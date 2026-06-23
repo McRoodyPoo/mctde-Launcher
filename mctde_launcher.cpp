@@ -29,8 +29,14 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "version.lib")
 
 #define WM_CHANGELOG_READY (WM_APP + 1)
+#define WM_VERSIONS_READY  (WM_APP + 2)
+
+// This launcher's own version. Bump on each launcher release and keep latest.txt's
+// mctde-launcher= line in sync, or self-update can loop.
+static const char* LAUNCHER_VERSION = "0.1.0";
 
 // ------------------------------------------------------------ control IDs
 #define IDC_CHK_PHANTOM  1001
@@ -41,6 +47,7 @@
 #define IDC_CHK_PRACTICE 1006
 #define IDC_LNK_PRACTICE 1007
 #define IDC_BTN_CHANGELOG 1008
+#define IDC_CHK_AUTOUPDATE 1009
 
 // Where the greyed-out practice-tool row links when the tool isn't bundled.
 // Eloise's PTDE Practice Tool (tasrunner branch).
@@ -98,6 +105,9 @@ static HWND g_chkPhantom  = nullptr;
 static HWND g_chkDsfix    = nullptr;
 static HWND g_btnConfig   = nullptr;
 static HWND g_chkPractice = nullptr;
+static HWND g_chkAutoUpdate = nullptr;
+static HWND g_lblVersion  = nullptr;
+static std::string g_latestLink, g_latestLauncher;  // filled by the update thread
 static HWND g_lnkPractice = nullptr;   // shown instead of a label when the tool isn't bundled
 static HFONT g_linkFont   = nullptr;   // underlined font for the link
 static WNDPROC g_origStaticProc = nullptr;
@@ -384,6 +394,8 @@ static std::string MappedValue(HWND h, const std::vector<std::string>& values) {
 
 static std::string g_dsText;        // loaded dsfix.ini contents, edited on save
 static bool g_advanced = false;     // Advanced Options toggle (per-open, not persisted)
+static bool g_fpsStabInit = false;  // initial basic-mode "FPS Stabilizer" state (for change detection)
+static bool g_defDofInit = false;   // initial basic-mode "Original DoF" state (for change detection)
 // HUD Mod values live here; the HUD sub-window edits them, the main Save writes them.
 static std::string g_hudEn, g_hudMin, g_hudScale, g_hudOpacity;
 
@@ -667,7 +679,10 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         U.fpsLimit = DsMakeEdit(hWnd, IDC_DS_FPSLIMIT, G("FPSlimit", "30"), 0, 0, 56);
         U.lblFpsThresh = DsMakeLabel(hWnd, L"FPS threshold", 0, 0, 92);
         U.fpsThresh = DsMakeEdit(hWnd, IDC_DS_FPSTHRESH, G("FPSthreshold", "28"), 0, 0, 56);
-        U.fpsStab = DsMakeCheck(hWnd, IDC_DS_FPSSTAB, L"FPS Stabilizer", true);
+        U.fpsStab = DsMakeCheck(hWnd, IDC_DS_FPSSTAB, L"FPS Stabilizer", G("unlockFPS", "1") != "0");
+        // Snapshot the basic-mode toggle states so Save can tell whether the user changed them.
+        g_fpsStabInit = CtlChecked(U.fpsStab);
+        g_defDofInit = CtlChecked(U.defDof);
 
         // Backups (advanced)
         U.hdrBackup = DsMakeLabel(hWnd, L"--- Save Game Backup Options ---", 0, 0, 280);
@@ -728,35 +743,37 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         }
         if (id == IDC_DS_SAVE) {
             std::string t = g_dsText;
-            auto setT = [&](const char* k, HWND h) { t = DsfixSet(t, k, CtlText(h)); };
-            auto setC = [&](const char* k, HWND h) { t = DsfixSet(t, k, CtlCombo(h)); };
-            auto setB = [&](const char* k, HWND h) { t = DsfixSet(t, k, CtlChecked(h) ? "1" : "0"); };
+            // Preserve the user's existing dsfix.ini: only write a key when the chosen value
+            // actually differs from what was loaded, so untouched settings stay exactly as-is.
+            auto put = [&](const char* k, const char* def, const std::string& v) {
+                if (v != DsfixGet(g_dsText, k, def)) t = DsfixSet(t, k, v);
+            };
+            auto chk = [&](HWND h) { return std::string(CtlChecked(h) ? "1" : "0"); };
 
-            setT("renderWidth", U.rw);   setT("renderHeight", U.rh);
-            setT("presentWidth", U.pw);  setT("presentHeight", U.ph);
-            setC("aaType", U.aaType);
-            t = DsfixSet(t, "aaQuality", CtlCombo(U.aaType) == "none" ? "0" : MappedValue(U.aaQual, AAQ_VAL));
-            t = DsfixSet(t, "ssaoStrength", MappedValue(U.ssao, SSAO_VAL));
-            t = DsfixSet(t, "filteringOverride", MappedValue(U.filter, FILT_VAL));
-            setB("borderlessFullscreen", U.border);
-            setB("captureCursor", U.capCur);
-            setB("disableCursor", U.disCur);
-            setB("skipIntro", U.skipIntro);
-            t = DsfixSet(t, "logLevel", CtlChecked(U.logLvl) ? "3" : "6");
+            put("renderWidth", "1920", CtlText(U.rw));   put("renderHeight", "1080", CtlText(U.rh));
+            put("presentWidth", "1920", CtlText(U.pw));  put("presentHeight", "1080", CtlText(U.ph));
+            put("aaType", "SMAA", CtlCombo(U.aaType));
+            put("aaQuality", "4", CtlCombo(U.aaType) == "none" ? std::string("0") : MappedValue(U.aaQual, AAQ_VAL));
+            put("ssaoStrength", "0", MappedValue(U.ssao, SSAO_VAL));
+            put("filteringOverride", "0", MappedValue(U.filter, FILT_VAL));
+            put("borderlessFullscreen", "0", chk(U.border));
+            put("captureCursor", "1", chk(U.capCur));
+            put("disableCursor", "1", chk(U.disCur));
+            put("skipIntro", "1", chk(U.skipIntro));
+            put("logLevel", "6", CtlChecked(U.logLvl) ? "3" : "6");
 
-            // HUD values (edited via the sub-window)
-            t = DsfixSet(t, "enableHudMod", g_hudEn);
-            t = DsfixSet(t, "enableMinimalHud", g_hudMin);
-            t = DsfixSet(t, "hudScaleFactor", g_hudScale);
-            t = DsfixSet(t, "hudOpacity", g_hudOpacity);
+            put("enableHudMod", "0", g_hudEn);
+            put("enableMinimalHud", "0", g_hudMin);
+            put("hudScaleFactor", "1.0", g_hudScale);
+            put("hudOpacity", "1.0", g_hudOpacity);
 
             // Depth of Field
             if (g_advanced) {
-                setT("dofOverrideResolution", U.dofRes);
-                setB("disableDofScaling", U.disDofScale);
-                setT("dofBlurAmount", U.dofBlur);
-            } else {
-                bool orig = CtlChecked(U.defDof);         // "Original DoF" checked => vanilla DoF (all zero)
+                put("dofOverrideResolution", "540", CtlText(U.dofRes));
+                put("disableDofScaling", "1", chk(U.disDofScale));
+                put("dofBlurAmount", "1", CtlText(U.dofBlur));
+            } else if (CtlChecked(U.defDof) != g_defDofInit) {   // basic: only if user toggled it
+                bool orig = CtlChecked(U.defDof);                // "Original DoF" => vanilla DoF (all zero)
                 t = DsfixSet(t, "dofOverrideResolution", orig ? "0" : "540");
                 t = DsfixSet(t, "disableDofScaling",     orig ? "0" : "1");
                 t = DsfixSet(t, "dofBlurAmount",         orig ? "0" : "1");
@@ -764,26 +781,26 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
             // Framerate
             if (g_advanced) {
-                setB("unlockFPS", U.unlockFps);
-                setT("FPSlimit", U.fpsLimit);
-                setT("FPSthreshold", U.fpsThresh);
-            } else {
+                put("unlockFPS", "1", chk(U.unlockFps));
+                put("FPSlimit", "30", CtlText(U.fpsLimit));
+                put("FPSthreshold", "28", CtlText(U.fpsThresh));
+            } else if (CtlChecked(U.fpsStab) != g_fpsStabInit) { // basic: only if user toggled it
                 bool stab = CtlChecked(U.fpsStab);
                 t = DsfixSet(t, "unlockFPS", stab ? "1" : "0");
-                t = DsfixSet(t, "FPSlimit", "30");        // FPSthreshold left untouched in basic mode
+                t = DsfixSet(t, "FPSlimit", "30");
             }
 
-            // Advanced-only sections: only written when shown, so basic mode preserves the ini.
+            // Advanced-only sections.
             if (g_advanced) {
-                t = DsfixSet(t, "dinput8dllWrapper", CtlCombo(U.dinput[0]));
+                put("dinput8dllWrapper", "none", CtlCombo(U.dinput[0]));
                 for (int i = 1; i < 10; ++i)
-                    t = DsfixSet(t, "dinputChain" + std::to_string(i), CtlCombo(U.dinput[i]));
-                setB("enableBackups", U.enBackup);
-                setT("backupInterval", U.bkpInt);
-                setT("maxBackups", U.bkpMax);
-                setB("forceWindowed", U.forceWin);
-                setB("enableVsync", U.enVsync);
-                setT("fullscreenHz", U.fsHz);
+                    put(("dinputChain" + std::to_string(i)).c_str(), "none", CtlCombo(U.dinput[i]));
+                put("enableBackups", "1", chk(U.enBackup));
+                put("backupInterval", "10", CtlText(U.bkpInt));
+                put("maxBackups", "10", CtlText(U.bkpMax));
+                put("forceWindowed", "0", chk(U.forceWin));
+                put("enableVsync", "0", chk(U.enVsync));
+                put("fullscreenHz", "60", CtlText(U.fsHz));
             }
 
             WriteFileUtf8(DsfixIniPath(), t);
@@ -1009,8 +1026,139 @@ static void DrawBanner(HWND hWnd, HDC hdc) {
     DeleteDC(mem);
 }
 
+// ------------------------------------------------------------ versions + auto-update
+// Installed mctde-Link version, read from d3d9.dll's file-version resource ("" if not present).
+static std::string LinkInstalledVersion() {
+    std::wstring dll = PathIn(L"d3d9.dll");
+    DWORD ignored = 0;
+    DWORD sz = GetFileVersionInfoSizeW(dll.c_str(), &ignored);
+    if (!sz) return "";
+    std::vector<BYTE> buf(sz);
+    if (!GetFileVersionInfoW(dll.c_str(), 0, sz, buf.data())) return "";
+    VS_FIXEDFILEINFO* ffi = nullptr; UINT len = 0;
+    if (!VerQueryValueW(buf.data(), L"\\", (void**)&ffi, &len) || !ffi) return "";
+    char v[64];
+    sprintf_s(v, sizeof(v), "%u.%u.%u",
+              HIWORD(ffi->dwFileVersionMS), LOWORD(ffi->dwFileVersionMS), HIWORD(ffi->dwFileVersionLS));
+    return v;
+}
+
+static bool AutoUpdateEnabled() {
+    return GetPrivateProfileIntW(L"Launcher", L"AutoUpdate", 1, PathIn(L"mctde-link.ini").c_str()) != 0;
+}
+static void SetAutoUpdate(bool on) {
+    WritePrivateProfileStringW(L"Launcher", L"AutoUpdate", on ? L"1" : L"0", PathIn(L"mctde-link.ini").c_str());
+}
+
+static std::string TrimStr(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n"); if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t\r\n"); return s.substr(a, b - a + 1);
+}
+static std::string ParseKv(const std::string& text, const std::string& key) {
+    std::istringstream in(text); std::string line;
+    while (std::getline(in, line)) {
+        size_t h = line.find('#'); if (h != std::string::npos) line = line.substr(0, h);
+        size_t eq = line.find('='); if (eq == std::string::npos) continue;
+        if (TrimStr(line.substr(0, eq)) == key) return TrimStr(line.substr(eq + 1));
+    }
+    return "";
+}
+// >0 if a>b, <0 if a<b, 0 equal (dotted-numeric compare)
+static int CmpVer(const std::string& a, const std::string& b) {
+    std::istringstream as(a), bs(b); std::string p;
+    std::vector<int> av, bv;
+    while (std::getline(as, p, '.')) av.push_back(atoi(p.c_str()));
+    while (std::getline(bs, p, '.')) bv.push_back(atoi(p.c_str()));
+    size_t n = av.size() > bv.size() ? av.size() : bv.size();
+    for (size_t i = 0; i < n; ++i) {
+        int x = i < av.size() ? av[i] : 0, y = i < bv.size() ? bv[i] : 0;
+        if (x != y) return x - y;
+    }
+    return 0;
+}
+
+// HTTPS GET to a file. WinHTTP follows GitHub's release->CDN redirects automatically.
+static bool DownloadToFile(const wchar_t* host, const wchar_t* path, const std::wstring& outFile, bool requirePE) {
+    std::string body;
+    if (!HttpsGet(host, path, body) || body.size() < 1024) return false;
+    if (requirePE && (body.size() < 2 || body[0] != 'M' || body[1] != 'Z')) return false;  // must be a PE
+    std::ofstream o(outFile.c_str(), std::ios::binary | std::ios::trunc);
+    if (!o.is_open()) return false;
+    o.write(body.data(), (std::streamsize)body.size());
+    return o.good();
+}
+
+// Replace the installed d3d9.dll with the latest release build. Safe because the game (which
+// loads d3d9.dll) is not running while the launcher is up, so the file isn't locked.
+static bool UpdateLink() {
+    std::wstring tmp = PathIn(L"d3d9.dll.new");
+    if (!DownloadToFile(L"github.com", L"/McRoodyPoo/mctde-Link/releases/latest/download/d3d9.dll", tmp, true))
+        return false;
+    return MoveFileExW(tmp.c_str(), PathIn(L"d3d9.dll").c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+}
+
+// Self-update: download the new launcher, rename the running exe aside, move the new one into
+// place, and relaunch. A rename failure rolls back (so a failed update never bricks the exe).
+// Sets MCTDE_SKIP_UPDATE on the child so the relaunched instance can't loop.
+static void UpdateLauncherAndRelaunch() {
+    wchar_t self[MAX_PATH] = {0};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring selfPath = self, newPath = selfPath + L".new", oldPath = selfPath + L".old";
+    if (!DownloadToFile(L"github.com", L"/McRoodyPoo/mctde-Launcher/releases/latest/download/mctde_launcher.exe",
+                        newPath, true))
+        return;
+    DeleteFileW(oldPath.c_str());
+    if (!MoveFileExW(selfPath.c_str(), oldPath.c_str(), MOVEFILE_REPLACE_EXISTING)) { DeleteFileW(newPath.c_str()); return; }
+    if (!MoveFileExW(newPath.c_str(), selfPath.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        MoveFileW(oldPath.c_str(), selfPath.c_str());   // rollback
+        return;
+    }
+    SetEnvironmentVariableW(L"MCTDE_SKIP_UPDATE", L"1");
+    STARTUPINFOW si = { sizeof(si) }; PROCESS_INFORMATION pi = {0};
+    std::wstring cmd = L"\"" + selfPath + L"\"";
+    std::vector<wchar_t> cb(cmd.begin(), cmd.end()); cb.push_back(0);
+    if (CreateProcessW(selfPath.c_str(), cb.data(), nullptr, nullptr, FALSE, 0, nullptr, g_dir.c_str(), &si, &pi)) {
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    }
+    ExitProcess(0);
+}
+
+static void SetVersionLabel(HWND hWnd) {
+    std::string link = LinkInstalledVersion(); if (link.empty()) link = "?";
+    std::string s = std::string("Launcher ") + LAUNCHER_VERSION + "      Link " + link;
+    if (!g_latestLauncher.empty() && CmpVer(g_latestLauncher, LAUNCHER_VERSION) > 0) s += "   (update available)";
+    else if (!g_latestLink.empty() && link != "?" && CmpVer(g_latestLink, link) > 0) s += "   (update available)";
+    std::wstring w(s.begin(), s.end());
+    if (g_lblVersion) SetWindowTextW(g_lblVersion, w.c_str());
+}
+
+// Background: read latest.txt, refresh the version label, and (if Auto-Update is on) update
+// mctde-Link and/or the launcher when out of date.
+static DWORD WINAPI UpdateThread(LPVOID param) {
+    HWND main = (HWND)param;
+    std::string manifest;
+    if (!HttpsGet(L"raw.githubusercontent.com", L"/McRoodyPoo/mctde-Link/main/latest.txt", manifest))
+        return 0;
+    g_latestLink = ParseKv(manifest, "mctde-link");
+    g_latestLauncher = ParseKv(manifest, "mctde-launcher");
+    if (IsWindow(main)) PostMessageW(main, WM_VERSIONS_READY, 0, 0);
+
+    wchar_t skip[8] = {0};
+    bool justRelaunched = GetEnvironmentVariableW(L"MCTDE_SKIP_UPDATE", skip, 8) > 0;
+    if (!AutoUpdateEnabled() || justRelaunched) return 0;
+
+    std::string instLink = LinkInstalledVersion();
+    bool linkOut = !g_latestLink.empty() && !instLink.empty() && CmpVer(g_latestLink, instLink) > 0;
+    bool launcherOut = !g_latestLauncher.empty() && CmpVer(g_latestLauncher, LAUNCHER_VERSION) > 0;
+
+    if (linkOut && UpdateLink() && IsWindow(main)) PostMessageW(main, WM_VERSIONS_READY, 0, 0);
+    if (launcherOut) UpdateLauncherAndRelaunch();   // may relaunch + exit
+    return 0;
+}
+
 static void ApplyAnd(HWND hWnd, bool launch) {
     SetPhantom(SendMessageW(g_chkPhantom, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    SetAutoUpdate(SendMessageW(g_chkAutoUpdate, BM_GETCHECK, 0, 0) == BST_CHECKED);
     if (IsWindowEnabled(g_chkDsfix))
         ApplyDsfix(SendMessageW(g_chkDsfix, BM_GETCHECK, 0, 0) == BST_CHECKED);
     if (IsWindowEnabled(g_chkPractice))
@@ -1038,18 +1186,30 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         g_btnConfig = CreateWindowW(L"BUTTON", L"Config",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 92, 198, 72, 26,
             hWnd, (HMENU)IDC_BTN_CONFIG, g_inst, nullptr);
+        // Version line + Auto-Update checkbox, stacked above PLAY on the right.
+        g_lblVersion = CreateWindowW(L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE | SS_RIGHT, 240, 252, 272, 16,
+            hWnd, nullptr, g_inst, nullptr);
+        g_chkAutoUpdate = CreateWindowW(L"BUTTON", L"Auto-Update",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 390, 272, 122, 20,
+            hWnd, (HMENU)IDC_CHK_AUTOUPDATE, g_inst, nullptr);
         HWND chlog = CreateWindowW(L"BUTTON", L"Changelog",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 16, 250, 100, 30,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 16, 300, 100, 30,
             hWnd, (HMENU)IDC_BTN_CHANGELOG, g_inst, nullptr);
         HWND exit = CreateWindowW(L"BUTTON", L"Exit",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 320, 250, 80, 30,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 300, 300, 80, 30,
             hWnd, (HMENU)IDC_BTN_EXIT, g_inst, nullptr);
         HWND play = CreateWindowW(L"BUTTON", L"PLAY",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 412, 244, 100, 40,
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 404, 296, 100, 40,
             hWnd, (HMENU)IDC_BTN_PLAY, g_inst, nullptr);
 
-        for (HWND h : { g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice, chlog, exit, play })
+        for (HWND h : { g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice,
+                        g_chkAutoUpdate, g_lblVersion, chlog, exit, play })
             SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+
+        SendMessageW(g_chkAutoUpdate, BM_SETCHECK, AutoUpdateEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+        SetVersionLabel(hWnd);   // installed versions immediately; refreshed when latest.txt lands
+        if (HANDLE ut = CreateThread(NULL, 0, UpdateThread, hWnd, 0, NULL)) CloseHandle(ut);
 
         // initial state from disk
         SendMessageW(g_chkPhantom, BM_SETCHECK, PhantomEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1088,6 +1248,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         EndPaint(hWnd, &ps);
         return 0;
     }
+    case WM_VERSIONS_READY:
+        SetVersionLabel(hWnd);
+        return 0;
     case WM_CTLCOLORSTATIC:
         if ((HWND)lParam == g_lnkPractice) {
             HDC dc = (HDC)wParam;
@@ -1119,6 +1282,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_inst = hInst;
     g_dir = ModuleDir();
 
+    // Clean up the previous exe left behind by a self-update.
+    {
+        wchar_t self[MAX_PATH] = {0};
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        DeleteFileW((std::wstring(self) + L".old").c_str());
+    }
+
     g_uiFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     g_banner = (HBITMAP)LoadImageW(hInst, MAKEINTRESOURCEW(IDB_BANNER), IMAGE_BITMAP,
                                    0, 0, LR_CREATEDIBSECTION);
@@ -1139,7 +1309,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.lpszClassName = L"mctdeLauncher";
     RegisterClassW(&wc);
 
-    RECT rc = { 0, 0, 524, 300 };
+    RECT rc = { 0, 0, 524, 346 };
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRect(&rc, style, FALSE);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
