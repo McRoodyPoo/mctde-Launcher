@@ -1,6 +1,6 @@
 # mctde-Launcher
 
-A small native Win32 launcher for the **mctde-Link** Dark Souls: Prepare to Die Edition mod.
+A small native Win32 launcher for **mctde**, a mod for Dark Souls: Prepare to Die Edition.
 Built dependency-free (static `/MT`, no .NET) so it runs cleanly under Proton/Wine in the same
 prefix as the game.
 
