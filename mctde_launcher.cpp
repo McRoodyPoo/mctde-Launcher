@@ -303,8 +303,27 @@ static std::string CtlText(HWND h) {
 }
 static std::string CtlCombo(HWND h) {
     int s = (int)SendMessageW(h, CB_GETCURSEL, 0, 0);
-    wchar_t b[32] = {0}; SendMessageW(h, CB_GETLBTEXT, s, (LPARAM)b);
+    wchar_t b[64] = {0}; SendMessageW(h, CB_GETLBTEXT, s, (LPARAM)b);
     std::wstring w(b); return std::string(w.begin(), w.end());
+}
+
+// DLLs in the DATA folder that could be chainloaded by DSFix's dinput8dllWrapper --
+// i.e. everything except DSFix's own dinput8.dll and the d3d9.dll proxy. "none" leads.
+static std::vector<std::wstring> DetectChainDlls() {
+    std::vector<std::wstring> out;
+    out.push_back(L"none");
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((g_dir + L"*.dll").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (_wcsicmp(fd.cFileName, L"dinput8.dll") == 0) continue;
+            if (_wcsicmp(fd.cFileName, L"d3d9.dll") == 0) continue;
+            out.push_back(fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    return out;
 }
 
 static std::string g_dsText;        // loaded dsfix.ini contents, edited on save
@@ -320,9 +339,9 @@ struct DsUi {
     HWND lblAA, aaType, lblAAQ, aaQual;
     HWND lblSSAO, ssao, lblFilter, filter;
     HWND lblBorder, border;
-    HWND capCur, disCur;
     HWND skipIntro, logLvl;
     HWND hudMod;
+    HWND hdrCursor, capCur, disCur;
     HWND lblDinput, dinput;
     HWND hdrDof, lblDofRes, dofRes, disDofScale, lblDofBlur, dofBlur, defDof;
     HWND hdrFps, unlockFps, lblFpsLimit, fpsLimit, lblFpsThresh, fpsThresh, fpsStab;
@@ -417,10 +436,16 @@ static void LayoutDsfix(HWND hWnd) {
     mv(U.lblAA, LX, y + 3, 28); mv(U.aaType, 48, y, 96, 200); mv(U.lblAAQ, 154, y + 3, 56); mv(U.aaQual, 212, y, 60, 200); y += ROW;
     mv(U.lblSSAO, LX, y + 3, 40); mv(U.ssao, 58, y, 60, 200); mv(U.lblFilter, 154, y + 3, 56); mv(U.filter, 212, y, 60, 22); y += ROW;
     mv(U.lblBorder, LX, y + 3, 150); mv(U.border, 168, y, 18, 22); y += ROW;
-    mv(U.capCur, LX, y, 180, 22); mv(U.disCur, 200, y, 180, 22); y += ROW;
     mv(U.skipIntro, LX, y, 180, 22); mv(U.logLvl, 200, y, 190, 22); y += ROW;
     mv(U.hudMod, LX, y, 250, 22); y += ROW;
-    mv(U.lblDinput, LX, y + 3, 150); mv(U.dinput, FX, y, 200, 22); y += ROW;
+
+    // --- Cursor ---
+    mv(U.hdrCursor, LX, y, 250, 18); y += HDR;
+    mv(U.capCur, LX, y, 180, 22); mv(U.disCur, 200, y, 180, 22); y += ROW;
+
+    // Dinput dll chaining (advanced only)
+    sh(U.lblDinput, adv); sh(U.dinput, adv);
+    if (adv) { mv(U.lblDinput, LX, y + 3, 150); mv(U.dinput, FX, y, 200, 200); y += ROW; }
 
     // --- Depth of Field ---
     mv(U.hdrDof, LX, y, 250, 18); y += HDR;
@@ -516,14 +541,25 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         U.lblBorder = DsMakeLabel(hWnd, L"Borderless Fullscreen", 0, 0, 150);
         U.border = DsMakeCheck(hWnd, IDC_DS_BORDER, L"", G("borderlessFullscreen", "0") == "1");
 
-        U.capCur = DsMakeCheck(hWnd, IDC_DS_CAPCUR, L"Capture cursor", G("captureCursor", "1") == "1");
-        U.disCur = DsMakeCheck(hWnd, IDC_DS_DISCUR, L"Disable cursor", G("disableCursor", "1") == "1");
         U.skipIntro = DsMakeCheck(hWnd, IDC_DS_SKIP, L"Skip intro", G("skipIntro", "1") == "1");
         U.logLvl = DsMakeCheck(hWnd, IDC_DS_LOG, L"Verbose logging", G("logLevel", "6") != "6");
         U.hudMod = DsMakeCheck(hWnd, IDC_DS_HUDMOD, L"HUD Mod (opens options)", g_hudEn == "1");
 
+        U.hdrCursor = DsMakeLabel(hWnd, L"--- Cursor ---", 0, 0, 250);
+        U.capCur = DsMakeCheck(hWnd, IDC_DS_CAPCUR, L"Capture cursor", G("captureCursor", "1") == "1");
+        U.disCur = DsMakeCheck(hWnd, IDC_DS_DISCUR, L"Disable cursor", G("disableCursor", "1") == "1");
+
+        // Dinput dll chaining (Advanced): dropdown of other DLLs found in the DATA folder.
         U.lblDinput = DsMakeLabel(hWnd, L"Dinput dll chaining", 0, 0, 150);
-        U.dinput = DsMakeEdit(hWnd, IDC_DS_DINPUT, G("dinput8dllWrapper", "none"), 0, 0, 200);
+        {
+            std::string cur = G("dinput8dllWrapper", "none");
+            std::vector<std::wstring> items = DetectChainDlls();
+            std::wstring curw(cur.begin(), cur.end());
+            bool present = false;
+            for (auto& s : items) if (_wcsicmp(s.c_str(), curw.c_str()) == 0) { present = true; break; }
+            if (!present && !cur.empty()) items.push_back(curw);  // keep a configured-but-absent value
+            U.dinput = DsMakeCombo(hWnd, IDC_DS_DINPUT, 0, 0, 200, items, cur);
+        }
 
         // DoF
         U.hdrDof = DsMakeLabel(hWnd, L"--- Depth of Field ---", 0, 0, 250);
@@ -612,7 +648,6 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
             setB("disableCursor", U.disCur);
             setB("skipIntro", U.skipIntro);
             t = DsfixSet(t, "logLevel", CtlChecked(U.logLvl) ? "3" : "6");
-            { std::string d = CtlText(U.dinput); if (d.empty()) d = "none"; t = DsfixSet(t, "dinput8dllWrapper", d); }
 
             // HUD values (edited via the sub-window)
             t = DsfixSet(t, "enableHudMod", g_hudEn);
@@ -645,6 +680,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
             // Advanced-only sections: only written when shown, so basic mode preserves the ini.
             if (g_advanced) {
+                t = DsfixSet(t, "dinput8dllWrapper", CtlCombo(U.dinput));
                 setB("enableBackups", U.enBackup);
                 setT("backupInterval", U.bkpInt);
                 setT("maxBackups", U.bkpMax);
@@ -675,7 +711,7 @@ static void OpenDsfixConfig(HWND owner) {
     if (!FileExists(DsfixIniPath())) {
         MessageBoxW(owner,
             L"dsfix.ini was not found next to the launcher.\n"
-            L"Make sure DSFix is bundled in this folder.",
+            L"Install DSFix into this folder to configure it.",
             L"DSFix Config", MB_OK | MB_ICONWARNING);
         return;
     }
@@ -772,7 +808,8 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         if (DsfixInstalled()) {
             SendMessageW(g_chkDsfix, BM_SETCHECK, DsfixEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
         } else {
-            // DSFix not bundled here -- can't toggle or configure it.
+            // DSFix not detected in this folder -- nothing to toggle or configure, so grey it out.
+            // (The launcher is standalone and never ships DSFix; the user installs it separately.)
             SendMessageW(g_chkDsfix, BM_SETCHECK, BST_UNCHECKED, 0);
             EnableWindow(g_chkDsfix, FALSE);
             EnableWindow(g_btnConfig, FALSE);
