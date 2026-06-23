@@ -18,6 +18,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <winhttp.h>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -27,6 +28,9 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "winhttp.lib")
+
+#define WM_CHANGELOG_READY (WM_APP + 1)
 
 // ------------------------------------------------------------ control IDs
 #define IDC_CHK_PHANTOM  1001
@@ -858,6 +862,74 @@ static std::wstring Utf8ToWide(const std::string& s) {
     return w;
 }
 
+// Combine the two changelogs (launcher + mctde-Link) into one CRLF-normalized wide string.
+static std::wstring BuildChangelogText(const std::string& launcherMd, const std::string& linkMd) {
+    std::string combined =
+        "=== mctde-Launcher ===\n\n" + launcherMd +
+        "\n\n\n=== mctde-Link ===\n\n" + linkMd;
+    std::string norm; norm.reserve(combined.size() + 128);
+    for (char c : combined) { if (c == '\r') continue; if (c == '\n') norm += "\r\n"; else norm += c; }
+    return Utf8ToWide(norm);
+}
+
+// GET an HTTPS URL into a string with short timeouts. false on any failure (offline/timeout/non-200).
+static bool HttpsGet(const wchar_t* host, const wchar_t* path, std::string& out) {
+    out.clear();
+    HINTERNET hS = WinHttpOpen(L"mctde-launcher/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hS) return false;
+    WinHttpSetTimeouts(hS, 3000, 3000, 4000, 4000);   // resolve/connect/send/receive
+    bool ok = false;
+    HINTERNET hC = WinHttpConnect(hS, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (hC) {
+        HINTERNET hR = WinHttpOpenRequest(hC, L"GET", path, NULL, WINHTTP_NO_REFERER,
+                                          WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (hR) {
+            if (WinHttpSendRequest(hR, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+                WinHttpReceiveResponse(hR, NULL)) {
+                DWORD status = 0, sz = sizeof(status);
+                WinHttpQueryHeaders(hR, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                    WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
+                if (status == 200) {
+                    DWORD avail = 0;
+                    do {
+                        if (!WinHttpQueryDataAvailable(hR, &avail)) break;
+                        if (!avail) break;
+                        std::vector<char> buf(avail);
+                        DWORD got = 0;
+                        if (WinHttpReadData(hR, buf.data(), avail, &got) && got > 0) out.append(buf.data(), got);
+                        else break;
+                    } while (avail > 0);
+                    ok = !out.empty();
+                }
+            }
+            WinHttpCloseHandle(hR);
+        }
+        WinHttpCloseHandle(hC);
+    }
+    WinHttpCloseHandle(hS);
+    return ok;
+}
+
+// Fetch both live changelogs from GitHub (per-file fallback to the embedded copy), then hand
+// the combined text back to the window via WM_CHANGELOG_READY. Runs off the UI thread so the
+// dialog opens instantly and never blocks when offline.
+static DWORD WINAPI ChangelogFetchThread(LPVOID param) {
+    HWND wnd = (HWND)param;
+    std::string launcherMd, linkMd;
+    if (!HttpsGet(L"raw.githubusercontent.com", L"/McRoodyPoo/mctde-Launcher/main/CHANGELOG.md", launcherMd))
+        launcherMd = LoadTextResource(IDR_CHANGELOG_LAUNCHER);
+    if (!HttpsGet(L"raw.githubusercontent.com", L"/McRoodyPoo/mctde-Link/main/CHANGELOG.md", linkMd))
+        linkMd = LoadTextResource(IDR_CHANGELOG_MCTDELINK);
+    std::wstring text = BuildChangelogText(launcherMd, linkMd);
+    size_t n = text.size() + 1;
+    wchar_t* buf = new wchar_t[n];
+    wmemcpy(buf, text.c_str(), n);
+    if (!IsWindow(wnd) || !PostMessageW(wnd, WM_CHANGELOG_READY, 0, (LPARAM)buf))
+        delete[] buf;   // window already closed -> drop it
+    return 0;
+}
+
 static LRESULT CALLBACK ChangelogWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
@@ -866,16 +938,24 @@ static LRESULT CALLBACK ChangelogWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
             10, 10, rc.right - 20, rc.bottom - 56, hWnd, (HMENU)100, g_inst, nullptr);
         SendMessageW(ed, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
-        std::string combined =
-            "=== mctde-Launcher ===\n\n" + LoadTextResource(IDR_CHANGELOG_LAUNCHER) +
-            "\n\n\n=== mctde-Link ===\n\n" + LoadTextResource(IDR_CHANGELOG_MCTDELINK);
-        // EDIT controls need CRLF line breaks; normalize first.
-        std::string norm; norm.reserve(combined.size() + 128);
-        for (char c : combined) { if (c == '\r') continue; if (c == '\n') norm += "\r\n"; else norm += c; }
-        SetWindowTextW(ed, Utf8ToWide(norm).c_str());
+        // Show the embedded copy instantly (also the offline fallback)...
+        SetWindowTextW(ed, BuildChangelogText(LoadTextResource(IDR_CHANGELOG_LAUNCHER),
+                                              LoadTextResource(IDR_CHANGELOG_MCTDELINK)).c_str());
+        // ...then refresh from GitHub in the background and swap it in if it arrives.
+        HANDLE th = CreateThread(NULL, 0, ChangelogFetchThread, hWnd, 0, NULL);
+        if (th) CloseHandle(th);
         HWND close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
             rc.right - 90, rc.bottom - 38, 80, 28, hWnd, (HMENU)IDCANCEL, g_inst, nullptr);
         SendMessageW(close, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        return 0;
+    }
+    case WM_CHANGELOG_READY: {
+        wchar_t* p = (wchar_t*)lParam;
+        if (p) {
+            HWND ed = GetDlgItem(hWnd, 100);
+            if (ed) SetWindowTextW(ed, p);
+            delete[] p;
+        }
         return 0;
     }
     case WM_COMMAND:
