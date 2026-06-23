@@ -1,0 +1,34 @@
+# mctde-Launcher
+
+A small native Win32 launcher for the **mctde-Link** Dark Souls: Prepare to Die Edition mod.
+Built dependency-free (static `/MT`, no .NET) so it runs cleanly under Proton/Wine in the same
+prefix as the game.
+
+It sits in the game's `DATA` folder beside `DARKSOULS.exe` and provides:
+
+- **Increased Phantom Limit** — writes `[MorePhantoms] Mode=On/Off` to `mctde-link.ini`
+  (the only way to opt in under Proton, where the in-game prompt is suppressed).
+- **Eloise's PTDE Practice Tool** — toggles the chainloaded `dinput8.dll` in
+  `mctde-Link_Chainload`; links to the latest release when not installed.
+- **DSFix** — toggles DSFix (`dinput8.dll` ↔ `dinput8.dll.off`) and opens a settings panel
+  that round-trips `dsfix.ini` (with an Advanced Options mode).
+- **PLAY / Exit** — launches `DARKSOULS.exe` in the same directory.
+
+## Build
+
+```
+build_launcher.bat
+```
+
+Requires MSVC (32-bit, matching the game). Edit the `VCVARS` path in the script for your VS
+install. Output: `bin\mctde_launcher.exe`.
+
+## Icon
+
+`make_icon.ps1 -Png <art.png>` regenerates `mctde.ico` (multi-resolution) from a square PNG.
+`build_launcher.bat` embeds it via `mctde_launcher.rc`.
+
+## Deploy
+
+Copy `bin\mctde_launcher.exe` (and `dsfix.ini` etc.) into the PTDE `DATA` folder, then point
+your Steam shortcut / launch target at it.

@@ -1,0 +1,4 @@
+#include "resource.h"
+
+// The first icon resource (lowest ID) becomes the exe's Explorer/taskbar icon.
+IDI_APPICON ICON "mctde.ico"
