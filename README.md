@@ -6,7 +6,7 @@ prefix as the game.
 
 It sits in the game's `DATA` folder beside `DARKSOULS.exe` and provides:
 
-- **Increased Phantom Limit** — writes `[MorePhantoms] Mode=On/Off` to `mctde-link.ini`
+- **Increased Phantom Limit** — writes `[PhantomUnleashed] Mode=On/Off` to `mctde-link.ini`
   (the only way to opt in under Proton, where the in-game prompt is suppressed).
 - **Eloise's PTDE Practice Tool** — toggles the chainloaded `dinput8.dll` in
   `mctde-Link_Chainload`; links to the latest release when not installed.

@@ -2,3 +2,11 @@
 
 // The first icon resource (lowest ID) becomes the exe's Explorer/taskbar icon.
 IDI_APPICON ICON "mctde.ico"
+
+// Pre-composed banner: black field with the title text on the left and the
+// Artorias silhouette on the right.
+IDB_BANNER BITMAP "banner.bmp"
+
+// Changelogs embedded as raw text so the launcher stays self-contained.
+IDR_CHANGELOG_LAUNCHER  RCDATA "CHANGELOG.md"
+IDR_CHANGELOG_MCTDELINK RCDATA "mctde-Link.CHANGELOG.md"

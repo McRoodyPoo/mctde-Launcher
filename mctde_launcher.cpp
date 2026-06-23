@@ -6,8 +6,8 @@
 //
 // It sits in the DATA folder next to d3d9.dll, dinput8.dll (DSFix), dsfix.ini, mctde-link.ini
 // and DARKSOULS.exe, and exposes:
-//   * "Increased Phantom Limit"  -> writes [MorePhantoms] Mode=On/Off in mctde-link.ini.
-//        On Proton the in-game Ask prompt is suppressed (MorePhantoms.cpp), so this is the
+//   * "Increased Phantom Limit"  -> writes [PhantomUnleashed] Mode=On/Off in mctde-link.ini.
+//        On Proton the in-game Ask prompt is suppressed (PhantomUnleashed.cpp), so this is the
 //        only way Linux players can opt in without hand-editing the ini.
 //   * "DSFix" (+ Config)         -> enables/disables DSFix by renaming its wrapper
 //        dinput8.dll <-> dinput8.dll.off, and opens a settings panel that round-trips dsfix.ini.
@@ -36,6 +36,7 @@
 #define IDC_BTN_EXIT     1005
 #define IDC_CHK_PRACTICE 1006
 #define IDC_LNK_PRACTICE 1007
+#define IDC_BTN_CHANGELOG 1008
 
 // Where the greyed-out practice-tool row links when the tool isn't bundled.
 // Eloise's PTDE Practice Tool (tasrunner branch).
@@ -58,7 +59,7 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 #define IDC_DS_SKIP      2016
 #define IDC_DS_LOG       2017
 #define IDC_DS_HUDMOD    2018
-#define IDC_DS_DINPUT    2019
+#define IDC_DS_DINPUT    2100   // base of 10 consecutive ids (2100..2109) for chain dropdowns
 #define IDC_DS_DOFRES    2008
 #define IDC_DS_DISDOFSCL 2020
 #define IDC_DS_DOFBLUR   2021
@@ -82,11 +83,12 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 #define IDC_HUD_OP       2063
 #define IDC_HUD_SAVE     2064
 #define IDC_HUD_CANCEL   2065
+#define IDC_HUD_LBL_SCALE 2066
+#define IDC_HUD_LBL_OP    2067
 
 static HINSTANCE g_inst = nullptr;
 static HFONT     g_uiFont = nullptr;     // standard control font
-static HFONT     g_titleFont = nullptr;  // banner serif title
-static HFONT     g_subFont = nullptr;    // banner subtitle
+static HBITMAP   g_banner = nullptr;     // pre-composed banner (title text + Artorias)
 
 static HWND g_chkPhantom  = nullptr;
 static HWND g_chkDsfix    = nullptr;
@@ -121,11 +123,11 @@ static bool FileExists(const std::wstring& p) {
 // ------------------------------------------------------------ mctde-link.ini (standard INI)
 static bool PhantomEnabled() {
     wchar_t buf[16] = {0};
-    GetPrivateProfileStringW(L"MorePhantoms", L"Mode", L"Off", buf, 16, PathIn(L"mctde-link.ini").c_str());
+    GetPrivateProfileStringW(L"PhantomUnleashed", L"Mode", L"Off", buf, 16, PathIn(L"mctde-link.ini").c_str());
     return _wcsicmp(buf, L"On") == 0;
 }
 static void SetPhantom(bool on) {
-    WritePrivateProfileStringW(L"MorePhantoms", L"Mode", on ? L"On" : L"Off",
+    WritePrivateProfileStringW(L"PhantomUnleashed", L"Mode", on ? L"On" : L"Off",
                                PathIn(L"mctde-link.ini").c_str());
 }
 
@@ -237,6 +239,9 @@ static std::string DsfixSet(const std::string& text, const std::string& key, con
 
 // ------------------------------------------------------------ launching the game
 static bool LaunchGame() {
+    // Mark the game process as launcher-spawned so mctde-Link's launcher guard lets it run
+    // (the child inherits this env var). Without it, the mod relaunches the launcher and quits.
+    SetEnvironmentVariableW(L"MCTDE_VIA_LAUNCHER", L"1");
     const wchar_t* exes[] = { L"DARKSOULS.exe", L"DATA.exe" };
     for (const wchar_t* exe : exes) {
         std::wstring full = PathIn(exe);
@@ -308,7 +313,16 @@ static std::string CtlCombo(HWND h) {
 }
 
 // DLLs in the DATA folder that could be chainloaded by DSFix's dinput8dllWrapper --
-// i.e. everything except DSFix's own dinput8.dll and the d3d9.dll proxy. "none" leads.
+// excludes DSFix's own dinput8.dll, the d3d9.dll proxy, and DLLs that are core to the
+// vanilla game (chaining those would do nothing useful or break the game). "none" leads.
+static bool IsCoreDll(const wchar_t* n) {
+    static const wchar_t* core[] = {
+        L"dinput8.dll", L"d3d9.dll", L"fmodex.dll", L"fmod_event.dll",
+        L"steam_api.dll", L"steam_api64.dll"
+    };
+    for (auto c : core) if (_wcsicmp(n, c) == 0) return true;
+    return false;
+}
 static std::vector<std::wstring> DetectChainDlls() {
     std::vector<std::wstring> out;
     out.push_back(L"none");
@@ -317,13 +331,51 @@ static std::vector<std::wstring> DetectChainDlls() {
     if (h != INVALID_HANDLE_VALUE) {
         do {
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            if (_wcsicmp(fd.cFileName, L"dinput8.dll") == 0) continue;
-            if (_wcsicmp(fd.cFileName, L"d3d9.dll") == 0) continue;
+            if (IsCoreDll(fd.cFileName)) continue;
             out.push_back(fd.cFileName);
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
     return out;
+}
+
+// A chain dropdown listing the detected DLLs (+ "none"), keeping a configured-but-absent
+// value selectable so it isn't silently lost.
+static HWND MakeChainCombo(HWND parent, int id, const std::string& cur) {
+    std::vector<std::wstring> items = DetectChainDlls();
+    std::wstring cw(cur.begin(), cur.end());
+    bool present = false;
+    for (auto& s : items) if (_wcsicmp(s.c_str(), cw.c_str()) == 0) { present = true; break; }
+    if (!present && !cur.empty()) items.push_back(cw);
+    return DsMakeCombo(parent, id, 0, 0, 240, items, cur);
+}
+
+// Combos whose visible label differs from the value stored in dsfix.ini.
+static const std::vector<std::wstring> AAQ_LBL  = { L"Low", L"Medium", L"High", L"Ultra" };
+static const std::vector<std::string>  AAQ_VAL  = { "1", "2", "3", "4" };
+static const std::vector<std::wstring> SSAO_LBL = { L"Off", L"Medium", L"High", L"Ultra" };
+static const std::vector<std::string>  SSAO_VAL = { "0", "1", "2", "3" };
+static const std::vector<std::wstring> FILT_LBL = { L"None", L"Bilinear", L"Anisotropic" };
+static const std::vector<std::string>  FILT_VAL = { "0", "1", "2" };
+
+static HWND MakeMappedCombo(HWND parent, int id, int w,
+                            const std::vector<std::wstring>& labels,
+                            const std::vector<std::string>& values, const std::string& cur) {
+    HWND h = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                           0, 0, w, 200, parent, (HMENU)(INT_PTR)id, g_inst, nullptr);
+    SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+    int sel = 0;
+    for (size_t i = 0; i < labels.size(); ++i) {
+        SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)labels[i].c_str());
+        if (values[i] == cur) sel = (int)i;
+    }
+    SendMessageW(h, CB_SETCURSEL, sel, 0);
+    return h;
+}
+static std::string MappedValue(HWND h, const std::vector<std::string>& values) {
+    int s = (int)SendMessageW(h, CB_GETCURSEL, 0, 0);
+    if (s < 0 || s >= (int)values.size()) s = 0;
+    return values[s];
 }
 
 static std::string g_dsText;        // loaded dsfix.ini contents, edited on save
@@ -333,16 +385,16 @@ static std::string g_hudEn, g_hudMin, g_hudScale, g_hudOpacity;
 
 // Every config control we need to lay out / read back.
 struct DsUi {
-    HWND adv;
+    HWND adv, hdrVideo;
     HWND lblRes, rw, resX, rh;
     HWND lblOut, pw, outX, ph;
     HWND lblAA, aaType, lblAAQ, aaQual;
     HWND lblSSAO, ssao, lblFilter, filter;
-    HWND lblBorder, border;
-    HWND skipIntro, logLvl;
+    HWND border;
     HWND hudMod;
     HWND hdrCursor, capCur, disCur;
-    HWND lblDinput, dinput;
+    HWND hdrOther, skipIntro, logLvl;
+    HWND hdrDinput, dinput[10];
     HWND hdrDof, lblDofRes, dofRes, disDofScale, lblDofBlur, dofBlur, defDof;
     HWND hdrFps, unlockFps, lblFpsLimit, fpsLimit, lblFpsThresh, fpsThresh, fpsStab;
     HWND hdrBackup, enBackup, lblBkpInt, bkpInt, lblBkpMax, bkpMax;
@@ -354,6 +406,15 @@ static DsUi U;
 static const int DS_CLIENTW = 400;
 
 // ---------------- HUD Mod sub-window ----------------
+// Everything except the master "Enable HUD Mod" checkbox is greyed out when it's unchecked.
+static void HudSetGroupEnabled(HWND w, bool en) {
+    EnableWindow(GetDlgItem(w, IDC_HUD_MIN), en);
+    EnableWindow(GetDlgItem(w, IDC_HUD_LBL_SCALE), en);
+    EnableWindow(GetDlgItem(w, IDC_HUD_SCALE), en);
+    EnableWindow(GetDlgItem(w, IDC_HUD_LBL_OP), en);
+    EnableWindow(GetDlgItem(w, IDC_HUD_OP), en);
+}
+
 static LRESULT CALLBACK HudWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
@@ -362,9 +423,13 @@ static LRESULT CALLBACK HudWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
         SetWindowPos(GetDlgItem(hWnd, IDC_HUD_EN), nullptr, lx, y, 250, 22, SWP_NOZORDER); y += dy;
         DsMakeCheck(hWnd, IDC_HUD_MIN, L"Minimal HUD",        g_hudMin == "1");
         SetWindowPos(GetDlgItem(hWnd, IDC_HUD_MIN), nullptr, lx, y, 250, 22, SWP_NOZORDER); y += dy;
-        DsMakeLabel(hWnd, L"HUD scale factor", lx, y + 3, 150);
+        HWND ls = CreateWindowW(L"STATIC", L"HUD scale factor", WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                lx, y + 3, 150, 18, hWnd, (HMENU)IDC_HUD_LBL_SCALE, g_inst, nullptr);
+        SendMessageW(ls, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
         DsMakeEdit(hWnd, IDC_HUD_SCALE, g_hudScale, fx, y, 70); y += dy;
-        DsMakeLabel(hWnd, L"Opacity (0-1)", lx, y + 3, 150);
+        HWND lo = CreateWindowW(L"STATIC", L"Opacity (0-1)", WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                lx, y + 3, 150, 18, hWnd, (HMENU)IDC_HUD_LBL_OP, g_inst, nullptr);
+        SendMessageW(lo, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
         DsMakeEdit(hWnd, IDC_HUD_OP, g_hudOpacity, fx, y, 70); y += dy + 6;
         HWND s = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                fx, y, 70, 28, hWnd, (HMENU)IDC_HUD_SAVE, g_inst, nullptr);
@@ -372,9 +437,14 @@ static LRESULT CALLBACK HudWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
                                fx + 80, y, 70, 28, hWnd, (HMENU)IDC_HUD_CANCEL, g_inst, nullptr);
         SendMessageW(s, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
         SendMessageW(c, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        HudSetGroupEnabled(hWnd, g_hudEn == "1");   // initial grey-out state
         return 0;
     }
     case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_HUD_EN) {
+            HudSetGroupEnabled(hWnd, CtlChecked(GetDlgItem(hWnd, IDC_HUD_EN)));
+            return 0;
+        }
         if (LOWORD(wParam) == IDC_HUD_SAVE) {
             g_hudEn      = CtlChecked(GetDlgItem(hWnd, IDC_HUD_EN)) ? "1" : "0";
             g_hudMin     = CtlChecked(GetDlgItem(hWnd, IDC_HUD_MIN)) ? "1" : "0";
@@ -408,7 +478,7 @@ static void OpenHudConfig(HWND owner) {
     RECT rc; GetWindowRect(owner, &rc);
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"mctdeHudConfig", L"HUD Mod",
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        rc.left + 50, rc.top + 60, 300, 210, owner, nullptr, g_inst, nullptr);
+        rc.left + 50, rc.top + 60, 360, 215, owner, nullptr, g_inst, nullptr);
     EnableWindow(owner, FALSE);
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
@@ -431,21 +501,22 @@ static void LayoutDsfix(HWND hWnd) {
 
     mv(U.adv, LX, y, 250, 22); y += 30;
 
+    // --- Video ---
+    mv(U.hdrVideo, LX, y, 250, 18); y += HDR;
     mv(U.lblRes, LX, y + 3, 150); mv(U.rw, FX, y, 56, 22); mv(U.resX, FX + 60, y + 3, 10, 18); mv(U.rh, FX + 74, y, 56, 22); y += ROW;
     mv(U.lblOut, LX, y + 3, 150); mv(U.pw, FX, y, 56, 22); mv(U.outX, FX + 60, y + 3, 10, 18); mv(U.ph, FX + 74, y, 56, 22); y += ROW;
-    mv(U.lblAA, LX, y + 3, 28); mv(U.aaType, 48, y, 96, 200); mv(U.lblAAQ, 154, y + 3, 56); mv(U.aaQual, 212, y, 60, 200); y += ROW;
-    mv(U.lblSSAO, LX, y + 3, 40); mv(U.ssao, 58, y, 60, 200); mv(U.lblFilter, 154, y + 3, 56); mv(U.filter, 212, y, 60, 22); y += ROW;
-    mv(U.lblBorder, LX, y + 3, 150); mv(U.border, 168, y, 18, 22); y += ROW;
-    mv(U.skipIntro, LX, y, 180, 22); mv(U.logLvl, 200, y, 190, 22); y += ROW;
+    mv(U.lblAA, LX, y + 3, 28); mv(U.aaType, 48, y, 96, 200); mv(U.lblAAQ, 150, y + 3, 66); mv(U.aaQual, 220, y, 80, 200); y += ROW;
+    mv(U.lblSSAO, LX, y + 3, 40); mv(U.ssao, 58, y, 78, 200); mv(U.lblFilter, 150, y + 3, 110); mv(U.filter, 262, y, 110, 200); y += ROW;
+    mv(U.border, LX, y, 250, 22); y += ROW;        // normal left checkbox
     mv(U.hudMod, LX, y, 250, 22); y += ROW;
 
     // --- Cursor ---
     mv(U.hdrCursor, LX, y, 250, 18); y += HDR;
     mv(U.capCur, LX, y, 180, 22); mv(U.disCur, 200, y, 180, 22); y += ROW;
 
-    // Dinput dll chaining (advanced only)
-    sh(U.lblDinput, adv); sh(U.dinput, adv);
-    if (adv) { mv(U.lblDinput, LX, y + 3, 150); mv(U.dinput, FX, y, 200, 200); y += ROW; }
+    // --- Other ---
+    mv(U.hdrOther, LX, y, 250, 18); y += HDR;
+    mv(U.skipIntro, LX, y, 180, 22); mv(U.logLvl, 200, y, 190, 22); y += ROW;
 
     // --- Depth of Field ---
     mv(U.hdrDof, LX, y, 250, 18); y += HDR;
@@ -488,6 +559,21 @@ static void LayoutDsfix(HWND hWnd) {
         mv(U.lblFsHz, LX, y + 3, 150); mv(U.fsHz, FX, y, 60, 22); y += ROW;
     }
 
+    // --- Dinput DLL Chaining (advanced only): cascading dropdowns ---
+    sh(U.hdrDinput, adv);
+    if (adv) {
+        mv(U.hdrDinput, LX, y, 280, 18); y += HDR;
+        bool prevInUse = true;   // first dropdown always shows; each next appears once the prior is used
+        for (int i = 0; i < 10; ++i) {
+            sh(U.dinput[i], prevInUse);
+            if (prevInUse) { mv(U.dinput[i], LX, y, 240, 200); y += ROW; }
+            std::string v = CtlCombo(U.dinput[i]);
+            prevInUse = prevInUse && v != "none" && !v.empty();
+        }
+    } else {
+        for (int i = 0; i < 10; ++i) sh(U.dinput[i], false);
+    }
+
     mv(U.credit, LX, y + 4, 370, 16); y += 26;
     mv(U.save, DS_CLIENTW - 164, y, 70, 28); mv(U.cancel, DS_CLIENTW - 86, y, 70, 28); y += 40;
 
@@ -517,6 +603,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         g_hudOpacity = G("hudOpacity", "1.0");
 
         U.adv = DsMakeCheck(hWnd, IDC_DS_ADV, L"Enable Advanced Options", false);
+        U.hdrVideo = DsMakeLabel(hWnd, L"--- Video ---", 0, 0, 250);
 
         U.lblRes = DsMakeLabel(hWnd, L"Internal resolution (W x H)", 0, 0, 150);
         U.rw = DsMakeEdit(hWnd, IDC_DS_RW, G("renderWidth", "1920"), 0, 0, 56);
@@ -530,35 +617,34 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
         U.lblAA = DsMakeLabel(hWnd, L"AA", 0, 0, 28);
         U.aaType = DsMakeCombo(hWnd, IDC_DS_AATYPE, 0, 0, 96, { L"none", L"SMAA", L"FXAA" }, G("aaType", "SMAA"));
-        U.lblAAQ = DsMakeLabel(hWnd, L"Quality", 0, 0, 56);
-        U.aaQual = DsMakeCombo(hWnd, IDC_DS_AAQUAL, 0, 0, 60, { L"0", L"1", L"2", L"3", L"4" }, G("aaQuality", "4"));
+        U.lblAAQ = DsMakeLabel(hWnd, L"AA Quality", 0, 0, 66);
+        U.aaQual = MakeMappedCombo(hWnd, IDC_DS_AAQUAL, 80, AAQ_LBL, AAQ_VAL, G("aaQuality", "4"));
 
         U.lblSSAO = DsMakeLabel(hWnd, L"SSAO", 0, 0, 40);
-        U.ssao = DsMakeCombo(hWnd, IDC_DS_SSAO, 0, 0, 60, { L"0", L"1", L"2", L"3" }, G("ssaoStrength", "0"));
-        U.lblFilter = DsMakeLabel(hWnd, L"Filtering", 0, 0, 56);
-        U.filter = DsMakeEdit(hWnd, IDC_DS_FILTER, G("filteringOverride", "0"), 0, 0, 60);
+        U.ssao = MakeMappedCombo(hWnd, IDC_DS_SSAO, 80, SSAO_LBL, SSAO_VAL, G("ssaoStrength", "0"));
+        U.lblFilter = DsMakeLabel(hWnd, L"Texture Filtering", 0, 0, 110);
+        U.filter = MakeMappedCombo(hWnd, IDC_DS_FILTER, 110, FILT_LBL, FILT_VAL, G("filteringOverride", "0"));
 
-        U.lblBorder = DsMakeLabel(hWnd, L"Borderless Fullscreen", 0, 0, 150);
-        U.border = DsMakeCheck(hWnd, IDC_DS_BORDER, L"", G("borderlessFullscreen", "0") == "1");
-
-        U.skipIntro = DsMakeCheck(hWnd, IDC_DS_SKIP, L"Skip intro", G("skipIntro", "1") == "1");
-        U.logLvl = DsMakeCheck(hWnd, IDC_DS_LOG, L"Verbose logging", G("logLevel", "6") != "6");
+        U.border = DsMakeCheck(hWnd, IDC_DS_BORDER, L"Borderless Fullscreen", G("borderlessFullscreen", "0") == "1");
         U.hudMod = DsMakeCheck(hWnd, IDC_DS_HUDMOD, L"HUD Mod (opens options)", g_hudEn == "1");
+        // AA Quality is meaningless when antialiasing is off.
+        if (G("aaType", "SMAA") == "none") EnableWindow(U.aaQual, FALSE);
+
+        U.hdrOther = DsMakeLabel(hWnd, L"--- Other ---", 0, 0, 250);
+        U.skipIntro = DsMakeCheck(hWnd, IDC_DS_SKIP, L"Skip intro", G("skipIntro", "1") == "1");
+        U.logLvl = DsMakeCheck(hWnd, IDC_DS_LOG, L"Logging", G("logLevel", "6") != "6");
 
         U.hdrCursor = DsMakeLabel(hWnd, L"--- Cursor ---", 0, 0, 250);
         U.capCur = DsMakeCheck(hWnd, IDC_DS_CAPCUR, L"Capture cursor", G("captureCursor", "1") == "1");
         U.disCur = DsMakeCheck(hWnd, IDC_DS_DISCUR, L"Disable cursor", G("disableCursor", "1") == "1");
 
-        // Dinput dll chaining (Advanced): dropdown of other DLLs found in the DATA folder.
-        U.lblDinput = DsMakeLabel(hWnd, L"Dinput dll chaining", 0, 0, 150);
-        {
-            std::string cur = G("dinput8dllWrapper", "none");
-            std::vector<std::wstring> items = DetectChainDlls();
-            std::wstring curw(cur.begin(), cur.end());
-            bool present = false;
-            for (auto& s : items) if (_wcsicmp(s.c_str(), curw.c_str()) == 0) { present = true; break; }
-            if (!present && !cur.empty()) items.push_back(curw);  // keep a configured-but-absent value
-            U.dinput = DsMakeCombo(hWnd, IDC_DS_DINPUT, 0, 0, 200, items, cur);
+        // Dinput DLL chaining (Advanced): a cascading list of dropdowns. The first holds
+        // DSFix's dinput8dllWrapper; extras are stored in dinputChain1..9 (DSFix ignores them).
+        U.hdrDinput = DsMakeLabel(hWnd, L"--- Dinput DLL Chaining ---", 0, 0, 280);
+        for (int i = 0; i < 10; ++i) {
+            std::string cur = (i == 0) ? G("dinput8dllWrapper", "none")
+                                       : G(("dinputChain" + std::to_string(i)).c_str(), "none");
+            U.dinput[i] = MakeChainCombo(hWnd, IDC_DS_DINPUT + i, cur);
         }
 
         // DoF
@@ -568,7 +654,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         U.disDofScale = DsMakeCheck(hWnd, IDC_DS_DISDOFSCL, L"Disable DOF scaling", G("disableDofScaling", "1") == "1");
         U.lblDofBlur = DsMakeLabel(hWnd, L"DOF additional blur", 0, 0, 150);
         U.dofBlur = DsMakeEdit(hWnd, IDC_DS_DOFBLUR, G("dofBlurAmount", "1"), 0, 0, 60);
-        U.defDof = DsMakeCheck(hWnd, IDC_DS_DEFDOF, L"Default DoF", false);
+        U.defDof = DsMakeCheck(hWnd, IDC_DS_DEFDOF, L"Original DoF", false);
 
         // Framerate
         U.hdrFps = DsMakeLabel(hWnd, L"--- Framerate ---", 0, 0, 250);
@@ -610,6 +696,10 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
     }
     case WM_COMMAND: {
         int id = LOWORD(wParam);
+        if (HIWORD(wParam) == CBN_SELCHANGE) {
+            if (id == IDC_DS_AATYPE) { EnableWindow(U.aaQual, CtlCombo(U.aaType) != "none"); return 0; }
+            if (id >= IDC_DS_DINPUT && id < IDC_DS_DINPUT + 10) { LayoutDsfix(hWnd); return 0; }
+        }
         if (id == IDC_DS_ADV) {
             bool checked = CtlChecked(U.adv);
             if (checked && !g_advanced) {
@@ -640,9 +730,10 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
             setT("renderWidth", U.rw);   setT("renderHeight", U.rh);
             setT("presentWidth", U.pw);  setT("presentHeight", U.ph);
-            setC("aaType", U.aaType);    setC("aaQuality", U.aaQual);
-            setC("ssaoStrength", U.ssao);
-            setT("filteringOverride", U.filter);
+            setC("aaType", U.aaType);
+            t = DsfixSet(t, "aaQuality", CtlCombo(U.aaType) == "none" ? "0" : MappedValue(U.aaQual, AAQ_VAL));
+            t = DsfixSet(t, "ssaoStrength", MappedValue(U.ssao, SSAO_VAL));
+            t = DsfixSet(t, "filteringOverride", MappedValue(U.filter, FILT_VAL));
             setB("borderlessFullscreen", U.border);
             setB("captureCursor", U.capCur);
             setB("disableCursor", U.disCur);
@@ -661,10 +752,10 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
                 setB("disableDofScaling", U.disDofScale);
                 setT("dofBlurAmount", U.dofBlur);
             } else {
-                bool def = CtlChecked(U.defDof);          // "Default DoF" checked => all zero
-                t = DsfixSet(t, "dofOverrideResolution", def ? "0" : "540");
-                t = DsfixSet(t, "disableDofScaling",     def ? "0" : "1");
-                t = DsfixSet(t, "dofBlurAmount",         def ? "0" : "1");
+                bool orig = CtlChecked(U.defDof);         // "Original DoF" checked => vanilla DoF (all zero)
+                t = DsfixSet(t, "dofOverrideResolution", orig ? "0" : "540");
+                t = DsfixSet(t, "disableDofScaling",     orig ? "0" : "1");
+                t = DsfixSet(t, "dofBlurAmount",         orig ? "0" : "1");
             }
 
             // Framerate
@@ -680,7 +771,9 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
             // Advanced-only sections: only written when shown, so basic mode preserves the ini.
             if (g_advanced) {
-                t = DsfixSet(t, "dinput8dllWrapper", CtlCombo(U.dinput));
+                t = DsfixSet(t, "dinput8dllWrapper", CtlCombo(U.dinput[0]));
+                for (int i = 1; i < 10; ++i)
+                    t = DsfixSet(t, "dinputChain" + std::to_string(i), CtlCombo(U.dinput[i]));
                 setB("enableBackups", U.enBackup);
                 setT("backupInterval", U.bkpInt);
                 setT("maxBackups", U.bkpMax);
@@ -747,21 +840,93 @@ static void OpenDsfixConfig(HWND owner) {
 }
 
 // ------------------------------------------------------------ main window
-static void DrawBanner(HWND hWnd, HDC hdc) {
-    RECT banner = { 12, 10, 512, 96 };
-    HBRUSH bg = CreateSolidBrush(RGB(12, 12, 14));
-    FillRect(hdc, &banner, bg);
-    DeleteObject(bg);
+// ------------------------------------------------------------ Changelog window
+static std::string LoadTextResource(int id) {
+    HRSRC r = FindResourceW(g_inst, MAKEINTRESOURCEW(id), RT_RCDATA);
+    if (!r) return "";
+    HGLOBAL g = LoadResource(g_inst, r);
+    if (!g) return "";
+    const char* p = (const char*)LockResource(g);
+    DWORD n = SizeofResource(g_inst, r);
+    return p ? std::string(p, p + n) : std::string();
+}
+static std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w(n, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
+    return w;
+}
 
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(225, 222, 215));
-    HFONT old = (HFONT)SelectObject(hdc, g_titleFont);
-    RECT t1 = { banner.left, banner.top + 18, banner.right, banner.top + 56 };
-    DrawTextW(hdc, L"Dark Souls Prepare To Die Edition", -1, &t1, DT_CENTER | DT_SINGLELINE);
-    SelectObject(hdc, g_subFont);
-    RECT t2 = { banner.left, banner.top + 52, banner.right, banner.top + 84 };
-    DrawTextW(hdc, L"mctde", -1, &t2, DT_CENTER | DT_SINGLELINE);
-    SelectObject(hdc, old);
+static LRESULT CALLBACK ChangelogWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE: {
+        RECT rc; GetClientRect(hWnd, &rc);
+        HWND ed = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            10, 10, rc.right - 20, rc.bottom - 56, hWnd, (HMENU)100, g_inst, nullptr);
+        SendMessageW(ed, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        std::string combined =
+            "=== mctde-Launcher ===\n\n" + LoadTextResource(IDR_CHANGELOG_LAUNCHER) +
+            "\n\n\n=== mctde-Link ===\n\n" + LoadTextResource(IDR_CHANGELOG_MCTDELINK);
+        // EDIT controls need CRLF line breaks; normalize first.
+        std::string norm; norm.reserve(combined.size() + 128);
+        for (char c : combined) { if (c == '\r') continue; if (c == '\n') norm += "\r\n"; else norm += c; }
+        SetWindowTextW(ed, Utf8ToWide(norm).c_str());
+        HWND close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            rc.right - 90, rc.bottom - 38, 80, 28, hWnd, (HMENU)IDCANCEL, g_inst, nullptr);
+        SendMessageW(close, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDCANCEL) { DestroyWindow(hWnd); return 0; }
+        return 0;
+    case WM_CLOSE: DestroyWindow(hWnd); return 0;
+    case WM_DESTROY:
+        if (HWND owner = GetWindow(hWnd, GW_OWNER)) { EnableWindow(owner, TRUE); SetActiveWindow(owner); }
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static void OpenChangelog(HWND owner) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc = {0};
+        wc.lpfnWndProc = ChangelogWndProc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"mctdeChangelog";
+        RegisterClassW(&wc);
+        registered = true;
+    }
+    RECT rc; GetWindowRect(owner, &rc);
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"mctdeChangelog", L"Changelog",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        rc.left + 30, rc.top + 20, 580, 560, owner, nullptr, g_inst, nullptr);
+    EnableWindow(owner, FALSE);
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        if (!IsDialogMessageW(dlg, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+        if (!IsWindow(dlg)) break;
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+}
+
+// Banner area: full client width, flush to the top.
+static const int BANNER_W = 524, BANNER_H = 115;
+static void DrawBanner(HWND hWnd, HDC hdc) {
+    if (!g_banner) return;
+    HDC mem = CreateCompatibleDC(hdc);
+    HGDIOBJ old = SelectObject(mem, g_banner);
+    BITMAP bm; GetObjectW(g_banner, sizeof(bm), &bm);
+    SetStretchBltMode(hdc, HALFTONE);
+    SetBrushOrgEx(hdc, 0, 0, nullptr);
+    StretchBlt(hdc, 0, 0, BANNER_W, BANNER_H, mem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteDC(mem);
 }
 
 static void ApplyAnd(HWND hWnd, bool launch) {
@@ -793,6 +958,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         g_btnConfig = CreateWindowW(L"BUTTON", L"Config",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 92, 198, 72, 26,
             hWnd, (HMENU)IDC_BTN_CONFIG, g_inst, nullptr);
+        HWND chlog = CreateWindowW(L"BUTTON", L"Changelog",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 16, 250, 100, 30,
+            hWnd, (HMENU)IDC_BTN_CHANGELOG, g_inst, nullptr);
         HWND exit = CreateWindowW(L"BUTTON", L"Exit",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 320, 250, 80, 30,
             hWnd, (HMENU)IDC_BTN_EXIT, g_inst, nullptr);
@@ -800,7 +968,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 412, 244, 100, 40,
             hWnd, (HMENU)IDC_BTN_PLAY, g_inst, nullptr);
 
-        for (HWND h : { g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice, exit, play })
+        for (HWND h : { g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice, chlog, exit, play })
             SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
 
         // initial state from disk
@@ -850,9 +1018,10 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         break;
     case WM_COMMAND: {
         switch (LOWORD(wParam)) {
-        case IDC_BTN_CONFIG: OpenDsfixConfig(hWnd); return 0;
-        case IDC_BTN_PLAY:   ApplyAnd(hWnd, true);  return 0;
-        case IDC_BTN_EXIT:   ApplyAnd(hWnd, false); return 0;
+        case IDC_BTN_CONFIG:    OpenDsfixConfig(hWnd); return 0;
+        case IDC_BTN_CHANGELOG: OpenChangelog(hWnd);   return 0;
+        case IDC_BTN_PLAY:      ApplyAnd(hWnd, true);  return 0;
+        case IDC_BTN_EXIT:      ApplyAnd(hWnd, false); return 0;
         case IDC_LNK_PRACTICE:
             if (HIWORD(wParam) == STN_CLICKED)
                 ShellExecuteW(hWnd, L"open", PRACTICE_RELEASE_URL, nullptr, nullptr, SW_SHOWNORMAL);
@@ -871,10 +1040,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_dir = ModuleDir();
 
     g_uiFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    g_titleFont = CreateFontW(30, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Times New Roman");
-    g_subFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Times New Roman");
+    g_banner = (HBITMAP)LoadImageW(hInst, MAKEINTRESOURCEW(IDB_BANNER), IMAGE_BITMAP,
+                                   0, 0, LR_CREATEDIBSECTION);
     // Underlined variant of the GUI font for the download link.
     LOGFONTW lf = {0};
     GetObjectW(g_uiFont, sizeof(lf), &lf);
@@ -911,8 +1078,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
             DispatchMessageW(&msg);
         }
     }
-    if (g_titleFont) DeleteObject(g_titleFont);
-    if (g_subFont)   DeleteObject(g_subFont);
-    if (g_linkFont)  DeleteObject(g_linkFont);
+    if (g_banner)   DeleteObject(g_banner);
+    if (g_linkFont) DeleteObject(g_linkFont);
     return (int)msg.wParam;
 }

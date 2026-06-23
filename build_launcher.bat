@@ -10,6 +10,8 @@ if not exist "%VCVARS%" (
 )
 call "%VCVARS%"
 cd /d "%~dp0"
+REM Refresh the embedded mctde-Link changelog from the sibling repo if it's present.
+if exist "..\mctde-Link\CHANGELOG.md" copy /Y "..\mctde-Link\CHANGELOG.md" "mctde-Link.CHANGELOG.md" >nul
 if not exist mctde.ico (
   echo mctde.ico not found - generating the stand-in icon...
   powershell -ExecutionPolicy Bypass -File "%~dp0make_icon.ps1"
