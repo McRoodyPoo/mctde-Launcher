@@ -100,7 +100,10 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 
 static HINSTANCE g_inst = nullptr;
 static HFONT     g_uiFont = nullptr;     // standard control font
-static HBITMAP   g_banner = nullptr;     // pre-composed banner (title text + Artorias)
+static HFONT     g_titleFont = nullptr;  // "Dark Souls"
+static HFONT     g_subFont = nullptr;    // "Prepare To Die Edition"
+static HFONT     g_mctdeFont = nullptr;  // "mctde"
+static HBITMAP   g_artorias = nullptr;   // trimmed white-on-black silhouette, drawn themed
 
 static HWND g_chkPhantom  = nullptr;
 static HWND g_chkDsfix    = nullptr;
@@ -1108,21 +1111,38 @@ static void OpenChangelog(HWND owner) {
     SetForegroundWindow(owner);
 }
 
-// Banner area: full client width, flush to the top.
-static const int BANNER_W = 524, BANNER_H = 115;
-static void DrawBanner(HWND hWnd, HDC hdc) {
-    if (!g_banner) return;
-    HDC mem = CreateCompatibleDC(hdc);
-    HGDIOBJ old = SelectObject(mem, g_banner);
-    BITMAP bm; GetObjectW(g_banner, sizeof(bm), &bm);
-    SetStretchBltMode(hdc, HALFTONE);
-    SetBrushOrgEx(hdc, 0, 0, nullptr);
-    // Banner is white-on-black. Dark mode uses it as-is; light mode inverts it so Artorias
-    // and the title become dark-on-light to match the theme.
-    StretchBlt(hdc, 0, 0, BANNER_W, BANNER_H, mem, 0, 0, bm.bmWidth, bm.bmHeight,
-               g_dark ? SRCCOPY : NOTSRCCOPY);
-    SelectObject(mem, old);
-    DeleteDC(mem);
+// Themed header: title text top-left + a large Artorias filling the dead space on the right.
+// Both are drawn in the theme's foreground colour (light on dark / dark on light).
+static void DrawHeader(HWND hWnd, HDC hdc) {
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, ThText());
+    HFONT old = (HFONT)SelectObject(hdc, g_titleFont);
+    TextOutW(hdc, 16, 10, L"Dark Souls", 10);
+    SelectObject(hdc, g_subFont);
+    TextOutW(hdc, 18, 52, L"Prepare To Die Edition", 22);
+    SelectObject(hdc, g_mctdeFont);
+    TextOutW(hdc, 18, 76, L"mctde", 5);
+    SelectObject(hdc, old);
+
+    if (g_artorias) {
+        BITMAP bm; GetObjectW(g_artorias, sizeof(bm), &bm);
+        // Fit (preserving aspect) into the right-side dead space, clear of the controls.
+        const int boxL = 296, boxT = 4, boxR = 518, boxB = 250;
+        double s = (double)(boxR - boxL) / bm.bmWidth;
+        double s2 = (double)(boxB - boxT) / bm.bmHeight;
+        if (s2 < s) s = s2;
+        int w = (int)(bm.bmWidth * s), h = (int)(bm.bmHeight * s);
+        int x = boxR - w, y = boxT + ((boxB - boxT) - h) / 2;
+        HDC mem = CreateCompatibleDC(hdc);
+        HGDIOBJ o = SelectObject(mem, g_artorias);
+        SetStretchBltMode(hdc, HALFTONE);
+        SetBrushOrgEx(hdc, 0, 0, nullptr);
+        // white-on-black source. Dark: OR (DSo) -> figure stays white, black blends into the
+        // dark bg. Light: DSna (dest AND NOT src) -> figure becomes black, bg is left untouched.
+        StretchBlt(hdc, x, y, w, h, mem, 0, 0, bm.bmWidth, bm.bmHeight, g_dark ? SRCPAINT : 0x00220326u);
+        SelectObject(mem, o);
+        DeleteDC(mem);
+    }
 }
 
 // ------------------------------------------------------------ versions + auto-update
@@ -1350,7 +1370,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
-        DrawBanner(hWnd, hdc);
+        DrawHeader(hWnd, hdc);
         EndPaint(hWnd, &ps);
         return 0;
     }
@@ -1395,8 +1415,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_uiFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     g_dark = DarkModeEnabled();
     ApplyTheme();
-    g_banner = (HBITMAP)LoadImageW(hInst, MAKEINTRESOURCEW(IDB_BANNER), IMAGE_BITMAP,
-                                   0, 0, LR_CREATEDIBSECTION);
+    g_artorias = (HBITMAP)LoadImageW(hInst, MAKEINTRESOURCEW(IDB_ARTORIAS), IMAGE_BITMAP,
+                                     0, 0, LR_CREATEDIBSECTION);
+    g_titleFont = CreateFontW(34, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Times New Roman");
+    g_subFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Times New Roman");
+    g_mctdeFont = CreateFontW(26, 0, 0, 0, FW_NORMAL, TRUE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Times New Roman");
     // Underlined variant of the GUI font for the download link.
     LOGFONTW lf = {0};
     GetObjectW(g_uiFont, sizeof(lf), &lf);
@@ -1433,9 +1459,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
             DispatchMessageW(&msg);
         }
     }
-    if (g_banner)   DeleteObject(g_banner);
-    if (g_linkFont) DeleteObject(g_linkFont);
-    if (g_brBg)     DeleteObject(g_brBg);
-    if (g_brField)  DeleteObject(g_brField);
+    if (g_artorias)  DeleteObject(g_artorias);
+    if (g_titleFont) DeleteObject(g_titleFont);
+    if (g_subFont)   DeleteObject(g_subFont);
+    if (g_mctdeFont) DeleteObject(g_mctdeFont);
+    if (g_linkFont)  DeleteObject(g_linkFont);
+    if (g_brBg)      DeleteObject(g_brBg);
+    if (g_brField)   DeleteObject(g_brField);
     return (int)msg.wParam;
 }

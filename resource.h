@@ -1,5 +1,5 @@
 #pragma once
 #define IDI_APPICON 101
-#define IDB_BANNER  102
+#define IDB_ARTORIAS 102
 #define IDR_CHANGELOG_LAUNCHER  200
 #define IDR_CHANGELOG_MCTDELINK 201
