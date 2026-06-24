@@ -1163,7 +1163,7 @@ static std::string LinkInstalledVersion() {
 }
 
 static bool AutoUpdateEnabled() {
-    return GetPrivateProfileIntW(L"Launcher", L"AutoUpdate", 1, PathIn(L"mctde-link.ini").c_str()) != 0;
+    return GetPrivateProfileIntW(L"Launcher", L"AutoUpdate", 0, PathIn(L"mctde-link.ini").c_str()) != 0;
 }
 static void SetAutoUpdate(bool on) {
     WritePrivateProfileStringW(L"Launcher", L"AutoUpdate", on ? L"1" : L"0", PathIn(L"mctde-link.ini").c_str());
