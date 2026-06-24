@@ -1298,10 +1298,10 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         // Widths are sized to the text so the controls' opaque background doesn't paint over
         // the Artorias silhouette on the right.
         g_chkPhantom = CreateWindowW(L"BUTTON", L"Increased Phantom Limit (not commonly used)",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 120, 300, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 120, 288, 22,
             hWnd, (HMENU)IDC_CHK_PHANTOM, g_inst, nullptr);
         g_chkPractice = CreateWindowW(L"BUTTON", L"Eloise's PTDE Practice Tool",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 160, 220, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 160, 200, 22,
             hWnd, (HMENU)IDC_CHK_PRACTICE, g_inst, nullptr);
         // DSFix + Config sit at the bottom of the list.
         g_chkDsfix = CreateWindowW(L"BUTTON", L"DSFix",
@@ -1362,7 +1362,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             EnableWindow(g_chkPractice, FALSE);
 
             g_lnkPractice = CreateWindowW(L"STATIC", L"Eloise's PTDE Practice Tool (download)",
-                WS_CHILD | WS_VISIBLE | SS_NOTIFY, 46, 161, 265, 20,
+                WS_CHILD | WS_VISIBLE | SS_NOTIFY, 46, 161, 248, 20,
                 hWnd, (HMENU)IDC_LNK_PRACTICE, g_inst, nullptr);
             SendMessageW(g_lnkPractice, WM_SETFONT, (WPARAM)g_linkFont, TRUE);
             g_origStaticProc = (WNDPROC)SetWindowLongPtrW(g_lnkPractice, GWLP_WNDPROC, (LONG_PTR)LinkProc);
