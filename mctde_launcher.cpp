@@ -48,6 +48,7 @@ static const char* LAUNCHER_VERSION = "0.1.0";
 #define IDC_LNK_PRACTICE 1007
 #define IDC_BTN_CHANGELOG 1008
 #define IDC_CHK_AUTOUPDATE 1009
+#define IDC_CHK_DARK 1010
 
 // Where the greyed-out practice-tool row links when the tool isn't bundled.
 // Eloise's PTDE Practice Tool (tasrunner branch).
@@ -106,6 +107,7 @@ static HWND g_chkDsfix    = nullptr;
 static HWND g_btnConfig   = nullptr;
 static HWND g_chkPractice = nullptr;
 static HWND g_chkAutoUpdate = nullptr;
+static HWND g_chkDark     = nullptr;
 static HWND g_lblVersion  = nullptr;
 static std::string g_latestLink, g_latestLauncher;  // filled by the update thread
 static HWND g_lnkPractice = nullptr;   // shown instead of a label when the tool isn't bundled
@@ -132,6 +134,94 @@ static std::wstring PathIn(const wchar_t* name) { return g_dir + name; }
 static bool FileExists(const std::wstring& p) {
     DWORD a = GetFileAttributesW(p.c_str());
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// ------------------------------------------------------------ theme (light / dark)
+static bool   g_dark = false;
+static HBRUSH g_brBg = nullptr, g_brField = nullptr;
+
+static COLORREF ThBg()     { return g_dark ? RGB(30, 30, 30)    : GetSysColor(COLOR_BTNFACE); }
+static COLORREF ThText()   { return g_dark ? RGB(225, 225, 225) : RGB(0, 0, 0); }
+static COLORREF ThField()  { return g_dark ? RGB(45, 45, 48)    : RGB(255, 255, 255); }
+static COLORREF ThBtn()    { return g_dark ? RGB(55, 55, 58)    : RGB(225, 225, 228); }
+static COLORREF ThBorder() { return g_dark ? RGB(95, 95, 100)   : RGB(120, 120, 120); }
+static COLORREF ThAccent() { return g_dark ? RGB(205, 175, 95)  : RGB(150, 110, 30); }
+
+static bool DarkModeEnabled() {
+    return GetPrivateProfileIntW(L"Launcher", L"DarkMode", 0, PathIn(L"mctde-link.ini").c_str()) != 0;
+}
+static void SetDarkMode(bool on) {
+    WritePrivateProfileStringW(L"Launcher", L"DarkMode", on ? L"1" : L"0", PathIn(L"mctde-link.ini").c_str());
+}
+static void ApplyTheme() {
+    if (g_brBg)    DeleteObject(g_brBg);
+    if (g_brField) DeleteObject(g_brField);
+    g_brBg = CreateSolidBrush(ThBg());
+    g_brField = CreateSolidBrush(ThField());
+}
+
+// Flat owner-drawn button (drawn in both themes -- the only portable way to get dark buttons
+// without the Win10 dark-control APIs, which don't exist under Wine/Proton).
+static void ThemeDrawButton(LPDRAWITEMSTRUCT d) {
+    RECT r = d->rcItem;
+    bool pressed   = (d->itemState & ODS_SELECTED) != 0;
+    bool isDefault = (d->itemState & ODS_DEFAULT) != 0;
+    bool disabled  = (d->itemState & ODS_DISABLED) != 0;
+    COLORREF face = ThBtn();
+    if (pressed) face = g_dark ? RGB(72, 72, 76) : RGB(200, 200, 203);
+    HBRUSH fb = CreateSolidBrush(face); FillRect(d->hDC, &r, fb); DeleteObject(fb);
+    HPEN pen = CreatePen(PS_SOLID, isDefault ? 2 : 1, isDefault ? ThAccent() : ThBorder());
+    HGDIOBJ op = SelectObject(d->hDC, pen);
+    HGDIOBJ ob = SelectObject(d->hDC, GetStockObject(NULL_BRUSH));
+    Rectangle(d->hDC, r.left, r.top, r.right, r.bottom);
+    SelectObject(d->hDC, op); SelectObject(d->hDC, ob); DeleteObject(pen);
+    wchar_t txt[64] = {0}; GetWindowTextW(d->hwndItem, txt, 64);
+    SetBkMode(d->hDC, TRANSPARENT);
+    SetTextColor(d->hDC, disabled ? (g_dark ? RGB(120,120,120) : RGB(150,150,150)) : ThText());
+    HFONT of = (HFONT)SelectObject(d->hDC, g_uiFont);
+    RECT tr = r; if (pressed) { tr.left++; tr.top++; }
+    DrawTextW(d->hDC, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(d->hDC, of);
+}
+
+// Shared themed message handling for every launcher window. Returns true (with *result set)
+// when it handled the message; in light mode it mostly declines so the OS draws natively.
+static bool ThemeHandle(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, LRESULT* result) {
+    switch (msg) {
+    case WM_ERASEBKGND:
+        if (g_dark) { RECT rc; GetClientRect(hWnd, &rc); FillRect((HDC)wParam, &rc, g_brBg); *result = 1; return true; }
+        return false;
+    case WM_CTLCOLORSTATIC:
+        if ((HWND)lParam == g_lnkPractice) {            // the download link keeps a blue
+            SetTextColor((HDC)wParam, g_dark ? RGB(90, 160, 250) : RGB(0, 90, 200));
+            SetBkColor((HDC)wParam, ThBg());
+            SetBkMode((HDC)wParam, OPAQUE);
+            *result = (LRESULT)(g_dark ? g_brBg : GetSysColorBrush(COLOR_BTNFACE));
+            return true;
+        }
+        // fall through to the generic static/button colouring
+    case WM_CTLCOLORBTN:
+        if (!g_dark) return false;
+        SetTextColor((HDC)wParam, ThText());
+        SetBkColor((HDC)wParam, ThBg());
+        SetBkMode((HDC)wParam, OPAQUE);
+        *result = (LRESULT)g_brBg;
+        return true;
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        if (!g_dark) return false;
+        SetTextColor((HDC)wParam, ThText());
+        SetBkColor((HDC)wParam, ThField());
+        SetBkMode((HDC)wParam, OPAQUE);
+        *result = (LRESULT)g_brField;
+        return true;
+    case WM_DRAWITEM: {
+        LPDRAWITEMSTRUCT d = (LPDRAWITEMSTRUCT)lParam;
+        if (d->CtlType == ODT_BUTTON) { ThemeDrawButton(d); *result = TRUE; return true; }
+        return false;
+    }
+    }
+    return false;
 }
 
 // ------------------------------------------------------------ mctde-link.ini (standard INI)
@@ -432,6 +522,8 @@ static void HudSetGroupEnabled(HWND w, bool en) {
 }
 
 static LRESULT CALLBACK HudWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LRESULT _tr = 0;
+    if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
     switch (msg) {
     case WM_CREATE: {
         int lx = 16, fx = 180, y = 16, dy = 30;
@@ -447,9 +539,9 @@ static LRESULT CALLBACK HudWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
                                 lx, y + 3, 150, 18, hWnd, (HMENU)IDC_HUD_LBL_OP, g_inst, nullptr);
         SendMessageW(lo, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
         DsMakeEdit(hWnd, IDC_HUD_OP, g_hudOpacity, fx, y, 70); y += dy + 6;
-        HWND s = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+        HWND s = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
                                fx, y, 70, 28, hWnd, (HMENU)IDC_HUD_SAVE, g_inst, nullptr);
-        HWND c = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        HWND c = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
                                fx + 80, y, 70, 28, hWnd, (HMENU)IDC_HUD_CANCEL, g_inst, nullptr);
         SendMessageW(s, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
         SendMessageW(c, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
@@ -606,6 +698,8 @@ static void LayoutDsfix(HWND hWnd) {
 }
 
 static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LRESULT _tr = 0;
+    if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
     switch (msg) {
     case WM_CREATE: {
         g_dsText = ReadFileUtf8(DsfixIniPath());
@@ -703,9 +797,9 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
             L"DSFix by Durante - GPL-3.0. Source: github.com/PeterTh/dsfix",
             WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 370, 16, hWnd, nullptr, g_inst, nullptr);
         SendMessageW(U.credit, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
-        U.save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+        U.save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
                                0, 0, 70, 28, hWnd, (HMENU)IDC_DS_SAVE, g_inst, nullptr);
-        U.cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        U.cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
                                  0, 0, 70, 28, hWnd, (HMENU)IDC_DS_CANCEL, g_inst, nullptr);
         SendMessageW(U.save, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
         SendMessageW(U.cancel, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
@@ -948,6 +1042,8 @@ static DWORD WINAPI ChangelogFetchThread(LPVOID param) {
 }
 
 static LRESULT CALLBACK ChangelogWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LRESULT _tr = 0;
+    if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
     switch (msg) {
     case WM_CREATE: {
         RECT rc; GetClientRect(hWnd, &rc);
@@ -961,7 +1057,7 @@ static LRESULT CALLBACK ChangelogWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         // ...then refresh from GitHub in the background and swap it in if it arrives.
         HANDLE th = CreateThread(NULL, 0, ChangelogFetchThread, hWnd, 0, NULL);
         if (th) CloseHandle(th);
-        HWND close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+        HWND close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
             rc.right - 90, rc.bottom - 38, 80, 28, hWnd, (HMENU)IDCANCEL, g_inst, nullptr);
         SendMessageW(close, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
         return 0;
@@ -1159,6 +1255,7 @@ static DWORD WINAPI UpdateThread(LPVOID param) {
 static void ApplyAnd(HWND hWnd, bool launch) {
     SetPhantom(SendMessageW(g_chkPhantom, BM_GETCHECK, 0, 0) == BST_CHECKED);
     SetAutoUpdate(SendMessageW(g_chkAutoUpdate, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    SetDarkMode(g_dark);
     if (IsWindowEnabled(g_chkDsfix))
         ApplyDsfix(SendMessageW(g_chkDsfix, BM_GETCHECK, 0, 0) == BST_CHECKED);
     if (IsWindowEnabled(g_chkPractice))
@@ -1171,6 +1268,8 @@ static void ApplyAnd(HWND hWnd, bool launch) {
 }
 
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LRESULT _tr = 0;
+    if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
     switch (msg) {
     case WM_CREATE: {
         g_chkPhantom = CreateWindowW(L"BUTTON", L"Increased Phantom Limit (not commonly used)",
@@ -1184,7 +1283,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 200, 64, 22,
             hWnd, (HMENU)IDC_CHK_DSFIX, g_inst, nullptr);
         g_btnConfig = CreateWindowW(L"BUTTON", L"Config",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 92, 198, 72, 26,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 92, 198, 72, 26,
             hWnd, (HMENU)IDC_BTN_CONFIG, g_inst, nullptr);
         // Version line + Auto-Update checkbox, stacked above PLAY on the right.
         g_lblVersion = CreateWindowW(L"STATIC", L"",
@@ -1193,21 +1292,25 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         g_chkAutoUpdate = CreateWindowW(L"BUTTON", L"Auto-Update",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 390, 272, 122, 20,
             hWnd, (HMENU)IDC_CHK_AUTOUPDATE, g_inst, nullptr);
+        g_chkDark = CreateWindowW(L"BUTTON", L"Dark Mode",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 274, 120, 20,
+            hWnd, (HMENU)IDC_CHK_DARK, g_inst, nullptr);
         HWND chlog = CreateWindowW(L"BUTTON", L"Changelog",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 16, 300, 100, 30,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 16, 300, 100, 30,
             hWnd, (HMENU)IDC_BTN_CHANGELOG, g_inst, nullptr);
         HWND exit = CreateWindowW(L"BUTTON", L"Exit",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 300, 300, 80, 30,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 300, 300, 80, 30,
             hWnd, (HMENU)IDC_BTN_EXIT, g_inst, nullptr);
         HWND play = CreateWindowW(L"BUTTON", L"PLAY",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 404, 296, 100, 40,
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW, 404, 296, 100, 40,
             hWnd, (HMENU)IDC_BTN_PLAY, g_inst, nullptr);
 
         for (HWND h : { g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice,
-                        g_chkAutoUpdate, g_lblVersion, chlog, exit, play })
+                        g_chkAutoUpdate, g_chkDark, g_lblVersion, chlog, exit, play })
             SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
 
         SendMessageW(g_chkAutoUpdate, BM_SETCHECK, AutoUpdateEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(g_chkDark, BM_SETCHECK, g_dark ? BST_CHECKED : BST_UNCHECKED, 0);
         SetVersionLabel(hWnd);   // installed versions immediately; refreshed when latest.txt lands
         if (HANDLE ut = CreateThread(NULL, 0, UpdateThread, hWnd, 0, NULL)) CloseHandle(ut);
 
@@ -1251,20 +1354,17 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_VERSIONS_READY:
         SetVersionLabel(hWnd);
         return 0;
-    case WM_CTLCOLORSTATIC:
-        if ((HWND)lParam == g_lnkPractice) {
-            HDC dc = (HDC)wParam;
-            SetTextColor(dc, RGB(0, 90, 200));   // link blue
-            SetBkMode(dc, TRANSPARENT);
-            return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
-        }
-        break;
     case WM_COMMAND: {
         switch (LOWORD(wParam)) {
         case IDC_BTN_CONFIG:    OpenDsfixConfig(hWnd); return 0;
         case IDC_BTN_CHANGELOG: OpenChangelog(hWnd);   return 0;
         case IDC_BTN_PLAY:      ApplyAnd(hWnd, true);  return 0;
         case IDC_BTN_EXIT:      ApplyAnd(hWnd, false); return 0;
+        case IDC_CHK_DARK:
+            g_dark = (SendMessageW(g_chkDark, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            ApplyTheme();
+            RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            return 0;
         case IDC_LNK_PRACTICE:
             if (HIWORD(wParam) == STN_CLICKED)
                 ShellExecuteW(hWnd, L"open", PRACTICE_RELEASE_URL, nullptr, nullptr, SW_SHOWNORMAL);
@@ -1290,6 +1390,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     }
 
     g_uiFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    g_dark = DarkModeEnabled();
+    ApplyTheme();
     g_banner = (HBITMAP)LoadImageW(hInst, MAKEINTRESOURCEW(IDB_BANNER), IMAGE_BITMAP,
                                    0, 0, LR_CREATEDIBSECTION);
     // Underlined variant of the GUI font for the download link.
@@ -1330,5 +1432,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     }
     if (g_banner)   DeleteObject(g_banner);
     if (g_linkFont) DeleteObject(g_linkFont);
+    if (g_brBg)     DeleteObject(g_brBg);
+    if (g_brField)  DeleteObject(g_brField);
     return (int)msg.wParam;
 }
