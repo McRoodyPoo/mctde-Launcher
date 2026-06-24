@@ -1117,7 +1117,10 @@ static void DrawBanner(HWND hWnd, HDC hdc) {
     BITMAP bm; GetObjectW(g_banner, sizeof(bm), &bm);
     SetStretchBltMode(hdc, HALFTONE);
     SetBrushOrgEx(hdc, 0, 0, nullptr);
-    StretchBlt(hdc, 0, 0, BANNER_W, BANNER_H, mem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+    // Banner is white-on-black. Dark mode uses it as-is; light mode inverts it so Artorias
+    // and the title become dark-on-light to match the theme.
+    StretchBlt(hdc, 0, 0, BANNER_W, BANNER_H, mem, 0, 0, bm.bmWidth, bm.bmHeight,
+               g_dark ? SRCCOPY : NOTSRCCOPY);
     SelectObject(mem, old);
     DeleteDC(mem);
 }
