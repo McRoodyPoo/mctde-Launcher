@@ -1,5 +1,15 @@
 # mctde-Launcher Changelog
 
+## v0.2.0 — FengShui
+
+- Dark Mode toggle with a fully themed light/dark UI.
+- Redesigned header: live title text with a large themed Artorias filling the dead space.
+- Artorias and title invert to match the theme (dark in light mode, light in dark mode).
+- Auto-update for both the launcher and mctde-Link, with a version display above Play.
+- Existing dsfix.ini settings are preserved — only options you actually change get written.
+- Changelog viewer now fetches the latest notes live from GitHub.
+- Now licensed under GPL-3.0.
+
 ## v0.1.0
 
 First release of the standalone launcher.
