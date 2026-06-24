@@ -1,5 +1,9 @@
 # mctde-Launcher Changelog
 
+## v0.3.2
+
+- Detect DSCM.exe sitting in the DATA folder beside the launcher, so the Auto-Launch DSCM row lights up even when DSCM isn't already running and no path has been remembered yet. (DSCM is still launched in place and never copied/moved.)
+
 ## v0.3.1 — Auto-DSCM
 
 - Auto-Launch DSCM checkbox: starts the Dark Souls Connectivity Mod (DSCM.exe) when the launcher opens, or the moment you tick the box.

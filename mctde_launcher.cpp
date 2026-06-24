@@ -37,7 +37,7 @@
 
 // This launcher's own version. Bump on each launcher release and keep latest.txt's
 // mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.3.1";
+static const char* LAUNCHER_VERSION = "0.3.2";
 
 // ------------------------------------------------------------ control IDs
 #define IDC_CHK_PHANTOM  1001
@@ -1378,8 +1378,13 @@ static bool FindDscmProcess(std::wstring& outPath) {
 }
 static bool DscmRunning() { std::wstring p; return FindDscmProcess(p); }
 
-// The path we'd launch DSCM from: a running instance if any (also captured as the saved path),
-// else the remembered path if it still exists. Empty if we don't know where DSCM is yet.
+// The path we'd launch DSCM from, in priority order:
+//   1. a running instance (also captured as the saved path),
+//   2. the remembered path if it still exists,
+//   3. a DSCM.exe sitting in the DATA folder next to the launcher.
+// Empty if we still don't know where DSCM is. We never copy/move DSCM into the
+// DATA folder (it self-updates in place), but if the user keeps it there we can
+// still find and launch it from there when nothing is running.
 static std::wstring DscmLaunchPath() {
     std::wstring running;
     if (FindDscmProcess(running) && !running.empty()) {
@@ -1388,6 +1393,8 @@ static std::wstring DscmLaunchPath() {
     }
     std::wstring saved = DscmSavedPath();
     if (!saved.empty() && FileExists(saved)) return saved;
+    std::wstring inData = PathIn(DSCM_EXE);
+    if (FileExists(inData)) return inData;
     return L"";
 }
 
