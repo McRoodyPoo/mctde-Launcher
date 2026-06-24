@@ -1127,7 +1127,7 @@ static void DrawHeader(HWND hWnd, HDC hdc) {
     if (g_artorias) {
         BITMAP bm; GetObjectW(g_artorias, sizeof(bm), &bm);
         // Fit (preserving aspect) into the right-side dead space, clear of the controls.
-        const int boxL = 328, boxT = 4, boxR = 518, boxB = 250;
+        const int boxL = 250, boxT = 2, boxR = 520, boxB = 248;
         double s = (double)(boxR - boxL) / bm.bmWidth;
         double s2 = (double)(boxB - boxT) / bm.bmHeight;
         if (s2 < s) s = s2;
