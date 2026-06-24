@@ -1419,11 +1419,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     ApplyTheme();
     g_artorias = (HBITMAP)LoadImageW(hInst, MAKEINTRESOURCEW(IDB_ARTORIAS), IMAGE_BITMAP,
                                      0, 0, LR_CREATEDIBSECTION);
-    // Copperplate Gothic -- the engraved small-caps look on countless old game installers/boxes.
-    g_titleFont = CreateFontW(28, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Copperplate Gothic Bold");
-    g_subFont = CreateFontW(13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Copperplate Gothic Light");
+    // Times New Roman -- the old game-manual / RPG-menu serif, on every Windows and reliably
+    // substituted under Wine/Proton (so it renders the same for everyone).
+    g_titleFont = CreateFontW(34, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Times New Roman");
+    g_subFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Times New Roman");
     g_mctdeFont = CreateFontW(26, 0, 0, 0, FW_NORMAL, TRUE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Times New Roman");
     // Underlined variant of the GUI font for the download link.
