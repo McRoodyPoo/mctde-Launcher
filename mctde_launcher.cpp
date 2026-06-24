@@ -6,7 +6,7 @@
 //
 // It sits in the DATA folder next to d3d9.dll, dinput8.dll (DSFix), dsfix.ini, mctde-link.ini
 // and DARKSOULS.exe, and exposes:
-//   * "Increased Phantom Limit"  -> writes [PhantomUnleashed] Mode=On/Off in mctde-link.ini.
+//   * "PhantomUnleashed (uncommon)"  -> writes [PhantomUnleashed] Mode=On/Off in mctde-link.ini.
 //        On Proton the in-game Ask prompt is suppressed (PhantomUnleashed.cpp), so this is the
 //        only way Linux players can opt in without hand-editing the ini.
 //   * "DSFix" (+ Config)         -> enables/disables DSFix by renaming its wrapper
@@ -17,6 +17,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <tlhelp32.h>
 #include <shellapi.h>
 #include <winhttp.h>
 #include <string>
@@ -36,7 +37,7 @@
 
 // This launcher's own version. Bump on each launcher release and keep latest.txt's
 // mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.2.0";
+static const char* LAUNCHER_VERSION = "0.3.1";
 
 // ------------------------------------------------------------ control IDs
 #define IDC_CHK_PHANTOM  1001
@@ -49,6 +50,13 @@ static const char* LAUNCHER_VERSION = "0.2.0";
 #define IDC_BTN_CHANGELOG 1008
 #define IDC_CHK_AUTOUPDATE 1009
 #define IDC_CHK_DARK 1010
+#define IDC_CHK_DSCM 1011
+
+// Timer that keeps re-scanning for DSCM while the row reads "Searching for DSCM...".
+#define IDT_DSCM_POLL 1
+// Short-lived timer that keeps a just-launched DSCM window behind the launcher (its window
+// appears a moment after launch, landing on top, so we sink it back for a few seconds).
+#define IDT_DSCM_FRONT 2
 
 // Where the greyed-out practice-tool row links when the tool isn't bundled.
 // Eloise's PTDE Practice Tool (tasrunner branch).
@@ -104,13 +112,20 @@ static HFONT     g_titleFont = nullptr;  // "Dark Souls"
 static HFONT     g_subFont = nullptr;    // "Prepare To Die Edition"
 static HFONT     g_mctdeFont = nullptr;  // "mctde"
 static HBITMAP   g_artorias = nullptr;   // trimmed white-on-black silhouette, drawn themed
+static HBITMAP   g_bgDark = nullptr;     // full pre-composed banner; whole-window bg in dark mode
+static HBITMAP   g_bgLight = nullptr;    // same, for light mode (pre-letterboxed to the client)
 
+static HWND g_hMain       = nullptr;     // main window, for gating the bg image to it alone
 static HWND g_chkPhantom  = nullptr;
 static HWND g_chkDsfix    = nullptr;
 static HWND g_btnConfig   = nullptr;
 static HWND g_chkPractice = nullptr;
 static HWND g_chkAutoUpdate = nullptr;
 static HWND g_chkDark     = nullptr;
+static HWND g_chkDscm     = nullptr;
+static bool g_dscmReady   = false;      // a launchable DSCM.exe path is known
+static DWORD g_dscmPid    = 0;          // pid of a DSCM we launched (to keep it behind us)
+static int  g_dscmFrontTicks = 0;       // IDT_DSCM_FRONT countdown
 static HWND g_lblVersion  = nullptr;
 static std::string g_latestLink, g_latestLauncher;  // filled by the update thread
 static HWND g_lnkPractice = nullptr;   // shown instead of a label when the tool isn't bundled
@@ -187,23 +202,64 @@ static void ThemeDrawButton(LPDRAWITEMSTRUCT d) {
     SelectObject(d->hDC, of);
 }
 
+// The pre-composed banner for the active theme (null if it failed to load).
+static HBITMAP CurrentBg() { return g_dark ? g_bgDark : g_bgLight; }
+
+// True when a pre-composed banner is the live background (on the main window). In that state the
+// window's solid fill is replaced by the image and child controls paint transparently so it
+// shows through behind them; the programmatic header is suppressed (the image carries it).
+static bool BgActive(HWND hWnd) { return CurrentBg() && hWnd == g_hMain; }
+
+// Stretch the active banner to fill the whole client area. The dark banner matches the client
+// aspect and the light banner is pre-letterboxed to it, so this is a 1:1/uniform blit -- no
+// visible stretch.
+static void PaintBg(HWND hWnd, HDC hdc) {
+    RECT rc; GetClientRect(hWnd, &rc);
+    HBITMAP bmp = CurrentBg();
+    BITMAP bm; GetObjectW(bmp, sizeof(bm), &bm);
+    HDC mem = CreateCompatibleDC(hdc);
+    HGDIOBJ o = SelectObject(mem, bmp);
+    SetStretchBltMode(hdc, HALFTONE);
+    SetBrushOrgEx(hdc, 0, 0, nullptr);
+    StretchBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+    SelectObject(mem, o);
+    DeleteDC(mem);
+}
+
+// Transparent controls don't erase, so when one repaints (checkbox toggled, label retitled) it
+// can leave ghosts over the banner. Repaint the banner behind the control, then redraw it clean.
+static void RepaintOverBg(HWND child) {
+    if (!BgActive(g_hMain) || !child) return;
+    RECT r; GetWindowRect(child, &r);
+    MapWindowPoints(HWND_DESKTOP, g_hMain, (POINT*)&r, 2);
+    RedrawWindow(g_hMain, &r, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
 // Shared themed message handling for every launcher window. Returns true (with *result set)
 // when it handled the message; in light mode it mostly declines so the OS draws natively.
 static bool ThemeHandle(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, LRESULT* result) {
     switch (msg) {
     case WM_ERASEBKGND:
+        if (BgActive(hWnd)) { PaintBg(hWnd, (HDC)wParam); *result = 1; return true; }
         if (g_dark) { RECT rc; GetClientRect(hWnd, &rc); FillRect((HDC)wParam, &rc, g_brBg); *result = 1; return true; }
         return false;
     case WM_CTLCOLORSTATIC:
         if ((HWND)lParam == g_lnkPractice) {            // the download link keeps a blue
             SetTextColor((HDC)wParam, g_dark ? RGB(90, 160, 250) : RGB(0, 90, 200));
             SetBkColor((HDC)wParam, ThBg());
-            SetBkMode((HDC)wParam, OPAQUE);
-            *result = (LRESULT)(g_dark ? g_brBg : GetSysColorBrush(COLOR_BTNFACE));
+            SetBkMode((HDC)wParam, BgActive(hWnd) ? TRANSPARENT : OPAQUE);
+            *result = (LRESULT)(BgActive(hWnd) ? GetStockObject(NULL_BRUSH)
+                                               : (g_dark ? g_brBg : GetSysColorBrush(COLOR_BTNFACE)));
             return true;
         }
         // fall through to the generic static/button colouring
     case WM_CTLCOLORBTN:
+        if (BgActive(hWnd)) {                            // let the banner show through the control
+            SetTextColor((HDC)wParam, ThText());
+            SetBkMode((HDC)wParam, TRANSPARENT);
+            *result = (LRESULT)GetStockObject(NULL_BRUSH);
+            return true;
+        }
         if (!g_dark) return false;
         SetTextColor((HDC)wParam, ThText());
         SetBkColor((HDC)wParam, ThBg());
@@ -1117,7 +1173,7 @@ static void DrawHeader(HWND hWnd, HDC hdc) {
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, ThText());
     HFONT old = (HFONT)SelectObject(hdc, g_titleFont);
-    TextOutW(hdc, 16, 10, L"Dark Souls", 10);
+    TextOutW(hdc, 16, 10, L"DARK SOULS", 10);
     SelectObject(hdc, g_subFont);
     TextOutW(hdc, 18, 52, L"Prepare To Die Edition", 22);
     SelectObject(hdc, g_mctdeFont);
@@ -1275,6 +1331,105 @@ static DWORD WINAPI UpdateThread(LPVOID param) {
     return 0;
 }
 
+// ------------------------------------------------------------ DSCM (Dark Souls Connectivity Mod / DaS-PC-MPChan)
+// DSCM.exe is the connectivity mod's launcher, and it self-updates in place. So we never copy
+// it into the DATA folder (a stale copy would just run the un-updated base build); instead we
+// launch it WHERE IT LIVES, with its own folder as the working directory, so its updater keeps
+// working. We learn that path from a running instance the first time DSCM is up, remember it in
+// mctde-link.ini, and reuse it on later starts. Until a path is known the row stays greyed as
+// "Searching for DSCM..." and a timer keeps re-scanning so starting DSCM by hand lights it up.
+static const wchar_t* DSCM_EXE = L"DSCM.exe";
+
+static bool AutoLaunchDscmEnabled() {
+    return GetPrivateProfileIntW(L"Launcher", L"AutoLaunchDSCM", 0, PathIn(L"mctde-link.ini").c_str()) != 0;
+}
+static void SetAutoLaunchDscm(bool on) {
+    WritePrivateProfileStringW(L"Launcher", L"AutoLaunchDSCM", on ? L"1" : L"0", PathIn(L"mctde-link.ini").c_str());
+}
+// Remembered full path to the user's real DSCM.exe (where it self-updates).
+static std::wstring DscmSavedPath() {
+    wchar_t buf[MAX_PATH] = {0};
+    GetPrivateProfileStringW(L"Launcher", L"DscmPath", L"", buf, MAX_PATH, PathIn(L"mctde-link.ini").c_str());
+    return buf;
+}
+static void SetDscmSavedPath(const std::wstring& p) {
+    WritePrivateProfileStringW(L"Launcher", L"DscmPath", p.c_str(), PathIn(L"mctde-link.ini").c_str());
+}
+
+// Find a running DSCM.exe and return its full image path. false if none is running.
+static bool FindDscmProcess(std::wstring& outPath) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, DSCM_EXE) != 0) continue;
+            HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (!h) continue;
+            wchar_t buf[MAX_PATH] = {0}; DWORD n = MAX_PATH;
+            if (QueryFullProcessImageNameW(h, 0, buf, &n)) { outPath = buf; found = true; }
+            CloseHandle(h);
+            if (found) break;
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+static bool DscmRunning() { std::wstring p; return FindDscmProcess(p); }
+
+// The path we'd launch DSCM from: a running instance if any (also captured as the saved path),
+// else the remembered path if it still exists. Empty if we don't know where DSCM is yet.
+static std::wstring DscmLaunchPath() {
+    std::wstring running;
+    if (FindDscmProcess(running) && !running.empty()) {
+        if (_wcsicmp(running.c_str(), DscmSavedPath().c_str()) != 0) SetDscmSavedPath(running);
+        return running;
+    }
+    std::wstring saved = DscmSavedPath();
+    if (!saved.empty() && FileExists(saved)) return saved;
+    return L"";
+}
+
+// Place a launched DSCM's top-level window directly behind the launcher in z-order.
+static BOOL CALLBACK SinkDscmBehindProc(HWND hwnd, LPARAM) {
+    DWORD pid = 0; GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == g_dscmPid && GetWindow(hwnd, GW_OWNER) == nullptr && IsWindowVisible(hwnd))
+        SetWindowPos(hwnd, g_hMain, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    return TRUE;
+}
+
+// Launch DSCM from its own folder, at normal size but WITHOUT activating it (DSCM mis-renders if
+// created minimized, so it must come up normal). Its window appears a beat later and lands on
+// top, so the caller starts IDT_DSCM_FRONT to sink it behind the launcher for a few seconds.
+static void LaunchDscmInPlace(const std::wstring& exe) {
+    g_dscmPid = 0;
+    if (exe.empty() || !FileExists(exe)) return;
+    std::wstring dir = exe.substr(0, exe.find_last_of(L"\\/") + 1);
+    STARTUPINFOW si = { sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_SHOWNOACTIVATE;          // normal size + layout; don't steal focus
+    PROCESS_INFORMATION pi = {0};
+    std::wstring cmd = L"\"" + exe + L"\"";
+    std::vector<wchar_t> cb(cmd.begin(), cmd.end()); cb.push_back(0);
+    if (CreateProcessW(exe.c_str(), cb.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                       dir.empty() ? nullptr : dir.c_str(), &si, &pi)) {
+        g_dscmPid = pi.dwProcessId;
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    }
+}
+
+// Refresh the row's enabled state + label from the current detection result.
+static void RefreshDscmRow(HWND hWnd) {
+    bool was = g_dscmReady;
+    g_dscmReady = !DscmLaunchPath().empty();
+    EnableWindow(g_chkDscm, g_dscmReady ? TRUE : FALSE);
+    SetWindowTextW(g_chkDscm, g_dscmReady ? L"Auto-Launch DSCM" : L"Searching for DSCM...");
+    SendMessageW(g_chkDscm, BM_SETCHECK,
+        (g_dscmReady && AutoLaunchDscmEnabled()) ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_dscmReady != was) RepaintOverBg(g_chkDscm);
+}
+
 static void ApplyAnd(HWND hWnd, bool launch) {
     SetPhantom(SendMessageW(g_chkPhantom, BM_GETCHECK, 0, 0) == BST_CHECKED);
     SetAutoUpdate(SendMessageW(g_chkAutoUpdate, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -1283,6 +1438,9 @@ static void ApplyAnd(HWND hWnd, bool launch) {
         ApplyDsfix(SendMessageW(g_chkDsfix, BM_GETCHECK, 0, 0) == BST_CHECKED);
     if (IsWindowEnabled(g_chkPractice))
         ApplyPractice(SendMessageW(g_chkPractice, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    // Only persist DSCM when detected -- don't clobber a saved "on" while it's undetected.
+    if (IsWindowEnabled(g_chkDscm))
+        SetAutoLaunchDscm(SendMessageW(g_chkDscm, BM_GETCHECK, 0, 0) == BST_CHECKED);
     if (launch) {
         if (LaunchGame()) DestroyWindow(hWnd);
     } else {
@@ -1295,9 +1453,10 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
     if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
     switch (msg) {
     case WM_CREATE: {
+        g_hMain = hWnd;
         // Widths are sized to the text so the controls' opaque background doesn't paint over
         // the Artorias silhouette on the right.
-        g_chkPhantom = CreateWindowW(L"BUTTON", L"Increased Phantom Limit (not commonly used)",
+        g_chkPhantom = CreateWindowW(L"BUTTON", L"PhantomUnleashed (uncommon)",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 120, 288, 22,
             hWnd, (HMENU)IDC_CHK_PHANTOM, g_inst, nullptr);
         g_chkPractice = CreateWindowW(L"BUTTON", L"Eloise's PTDE Practice Tool",
@@ -1310,12 +1469,18 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         g_btnConfig = CreateWindowW(L"BUTTON", L"Config",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 92, 198, 72, 26,
             hWnd, (HMENU)IDC_BTN_CONFIG, g_inst, nullptr);
-        // Version line + Auto-Update checkbox, stacked above PLAY on the right.
+        // Auto-Launch DSCM (Dark Souls Connectivity Mod). Greyed as "Searching for DSCM..."
+        // until DSCM.exe is found in the DATA folder (or copied in from a running instance).
+        g_chkDscm = CreateWindowW(L"BUTTON", L"Searching for DSCM...",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 238, 288, 22,
+            hWnd, (HMENU)IDC_CHK_DSCM, g_inst, nullptr);
+        // Version line in the empty top-left corner (the banner art sits top-right).
         g_lblVersion = CreateWindowW(L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_RIGHT, 240, 252, 272, 16,
+            WS_CHILD | WS_VISIBLE | SS_LEFT, 14, 10, 300, 16,
             hWnd, nullptr, g_inst, nullptr);
+        // Auto-Update checkbox, left-aligned with the PLAY button below it.
         g_chkAutoUpdate = CreateWindowW(L"BUTTON", L"Auto-Update",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 390, 272, 122, 20,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 404, 272, 110, 20,
             hWnd, (HMENU)IDC_CHK_AUTOUPDATE, g_inst, nullptr);
         g_chkDark = CreateWindowW(L"BUTTON", L"Dark Mode",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 274, 120, 20,
@@ -1330,7 +1495,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW, 404, 296, 100, 40,
             hWnd, (HMENU)IDC_BTN_PLAY, g_inst, nullptr);
 
-        for (HWND h : { g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice,
+        for (HWND h : { g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice, g_chkDscm,
                         g_chkAutoUpdate, g_chkDark, g_lblVersion, chlog, exit, play })
             SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
 
@@ -1361,30 +1526,67 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             SetWindowPos(g_chkPractice, nullptr, 0, 0, 18, 22, SWP_NOMOVE | SWP_NOZORDER);
             EnableWindow(g_chkPractice, FALSE);
 
-            g_lnkPractice = CreateWindowW(L"STATIC", L"Eloise's PTDE Practice Tool (download)",
+            g_lnkPractice = CreateWindowW(L"STATIC", L"Eloise's PTDE Practice Tool",
                 WS_CHILD | WS_VISIBLE | SS_NOTIFY, 46, 161, 248, 20,
                 hWnd, (HMENU)IDC_LNK_PRACTICE, g_inst, nullptr);
             SendMessageW(g_lnkPractice, WM_SETFONT, (WPARAM)g_linkFont, TRUE);
             g_origStaticProc = (WNDPROC)SetWindowLongPtrW(g_lnkPractice, GWLP_WNDPROC, (LONG_PTR)LinkProc);
         }
+
+        // DSCM: detect its real location, then auto-start it minimized in place if enabled and
+        // not already up. If we don't know where it is yet, keep polling for a running instance.
+        RefreshDscmRow(hWnd);
+        if (g_dscmReady && AutoLaunchDscmEnabled() && !DscmRunning()) {
+            LaunchDscmInPlace(DscmLaunchPath());
+            if (g_dscmPid) { g_dscmFrontTicks = 0; SetTimer(hWnd, IDT_DSCM_FRONT, 300, nullptr); }
+        }
+        if (!g_dscmReady)
+            SetTimer(hWnd, IDT_DSCM_POLL, 2000, nullptr);
         return 0;
     }
+    case WM_TIMER:
+        if (wParam == IDT_DSCM_POLL) {
+            if (!g_dscmReady) RefreshDscmRow(hWnd);
+            if (g_dscmReady) KillTimer(hWnd, IDT_DSCM_POLL);
+            return 0;
+        }
+        if (wParam == IDT_DSCM_FRONT) {
+            // DSCM's window can appear (and re-raise itself) during startup -- keep sinking it
+            // behind the launcher for ~3s, then stop.
+            if (g_dscmPid) EnumWindows(SinkDscmBehindProc, 0);
+            if (++g_dscmFrontTicks >= 10) KillTimer(hWnd, IDT_DSCM_FRONT);
+            return 0;
+        }
+        break;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
-        DrawHeader(hWnd, hdc);
+        // In dark mode the banner background already carries the title + figure, so the
+        // programmatic header would only double it up -- draw it in light mode only.
+        if (!BgActive(hWnd)) DrawHeader(hWnd, hdc);
         EndPaint(hWnd, &ps);
         return 0;
     }
     case WM_VERSIONS_READY:
         SetVersionLabel(hWnd);
+        RepaintOverBg(g_lblVersion);   // clear any ghost of the old (shorter) version text
         return 0;
     case WM_COMMAND: {
+        // Checkboxes paint transparently over the banner; clear ghosts behind the toggled box.
+        if (BgActive(hWnd) && lParam && HIWORD(wParam) == BN_CLICKED)
+            RepaintOverBg((HWND)lParam);
         switch (LOWORD(wParam)) {
         case IDC_BTN_CONFIG:    OpenDsfixConfig(hWnd); return 0;
         case IDC_BTN_CHANGELOG: OpenChangelog(hWnd);   return 0;
         case IDC_BTN_PLAY:      ApplyAnd(hWnd, true);  return 0;
         case IDC_BTN_EXIT:      ApplyAnd(hWnd, false); return 0;
+        case IDC_CHK_DSCM:
+            // Ticking the box starts DSCM right away (if it isn't already running).
+            if (CtlChecked(g_chkDscm) && !DscmRunning()) {
+                LaunchDscmInPlace(DscmLaunchPath());
+                if (g_dscmPid) { g_dscmFrontTicks = 0; SetTimer(hWnd, IDT_DSCM_FRONT, 300, nullptr); }
+            }
+            return 0;
         case IDC_CHK_DARK:
             g_dark = (SendMessageW(g_chkDark, BM_GETCHECK, 0, 0) == BST_CHECKED);
             ApplyTheme();
@@ -1419,10 +1621,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     ApplyTheme();
     g_artorias = (HBITMAP)LoadImageW(hInst, MAKEINTRESOURCEW(IDB_ARTORIAS), IMAGE_BITMAP,
                                      0, 0, LR_CREATEDIBSECTION);
-    // Times New Roman -- the old game-manual / RPG-menu serif, on every Windows and reliably
-    // substituted under Wine/Proton (so it renders the same for everyone).
-    g_titleFont = CreateFontW(34, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Times New Roman");
+    g_bgDark = (HBITMAP)LoadImageW(hInst, MAKEINTRESOURCEW(IDB_BG_DARK), IMAGE_BITMAP,
+                                   0, 0, LR_CREATEDIBSECTION);
+    g_bgLight = (HBITMAP)LoadImageW(hInst, MAKEINTRESOURCEW(IDB_BG_LIGHT), IMAGE_BITMAP,
+                                    0, 0, LR_CREATEDIBSECTION);
+    // "DARK SOULS" title in OptimusPrincepsSemiBold -- the actual Dark Souls logo typeface.
+    // NOTE: not a stock Windows font; must be installed on the system (or bundled + registered
+    // via AddFontResourceEx) or GDI silently substitutes another serif.
+    g_titleFont = CreateFontW(34, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"OptimusPrincepsSemiBold");
     g_subFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FF_ROMAN, L"Times New Roman");
     g_mctdeFont = CreateFontW(26, 0, 0, 0, FW_NORMAL, TRUE, FALSE, FALSE, DEFAULT_CHARSET,
@@ -1444,6 +1651,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.lpszClassName = L"mctdeLauncher";
     RegisterClassW(&wc);
 
+    // Client is 524x346 -- the size both pre-composed banners are authored/letterboxed to, so
+    // each fills the background 1:1 with no stretch. The dark banner keeps its art in the
+    // top-right dead space; the controls sit over the clear left/bottom.
     RECT rc = { 0, 0, 524, 346 };
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRect(&rc, style, FALSE);
@@ -1464,6 +1674,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
         }
     }
     if (g_artorias)  DeleteObject(g_artorias);
+    if (g_bgDark)    DeleteObject(g_bgDark);
+    if (g_bgLight)   DeleteObject(g_bgLight);
     if (g_titleFont) DeleteObject(g_titleFont);
     if (g_subFont)   DeleteObject(g_subFont);
     if (g_mctdeFont) DeleteObject(g_mctdeFont);

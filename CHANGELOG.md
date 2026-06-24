@@ -1,5 +1,12 @@
 # mctde-Launcher Changelog
 
+## v0.3.1 — Auto-DSCM
+
+- Auto-Launch DSCM checkbox: starts the Dark Souls Connectivity Mod (DSCM.exe) when the launcher opens, or the moment you tick the box.
+- DSCM opens behind the launcher window without stealing focus, and is skipped if it's already running.
+- Runs DSCM from its own folder so its in-place self-updater keeps working (never copies a stale build into DATA).
+- Finds DSCM's path from a running instance and remembers it; the row stays greyed "Searching for DSCM..." until found.
+
 ## v0.2.0 — FengShui
 
 - Dark Mode toggle with a fully themed light/dark UI.

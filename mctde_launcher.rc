@@ -6,6 +6,12 @@ IDI_APPICON ICON "mctde.ico"
 // Trimmed white-on-black Artorias silhouette, drawn themed (inverted in light mode).
 IDB_ARTORIAS BITMAP "artorias.bmp"
 
+// Full pre-composed banners used as the whole-window background, replacing the programmatic
+// header in that theme. Dark: gray art over a black|tan split. Light: gray art over light grey,
+// pre-letterboxed onto the 524x369 client so it fills without stretching.
+IDB_BG_DARK  BITMAP "mctde_bg_dark.bmp"
+IDB_BG_LIGHT BITMAP "mctde_bg_light.bmp"
+
 // Changelogs embedded as raw text so the launcher stays self-contained.
 IDR_CHANGELOG_LAUNCHER  RCDATA "CHANGELOG.md"
 IDR_CHANGELOG_MCTDELINK RCDATA "mctde-Link.CHANGELOG.md"
