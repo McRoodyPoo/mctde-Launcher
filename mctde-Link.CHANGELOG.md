@@ -1,10 +1,21 @@
 # Changelog
 
+## v0.4.4 - Homecoming
+
+- Fixed the launcher not reopening after a mod auto-update.
+- The update helper now relaunches `mctde_launcher.exe` when present (unless `[Launcher] RequireLauncher` is 0), instead of letting the updated game run directly.
+
+> Note: applies to updates started from 0.4.4 onward; the 0.4.x → 0.4.4 update itself still uses the old helper.
+
+## v0.4.3 - Reversal
+
+- Reverted the 0.4.2 launcher-guard change. Restored the original behavior: starting the game without the launcher (folder/direct launch) reopens mctde_launcher.exe, exactly as in 0.4.1. 0.4.2's Steam-only scoping stopped the launcher from reopening on a folder launch; this undoes that.
+
 ## v0.4.1 - GooeyInterface
 
 - Renamed the in-game phantom-cap feature from MorePhantoms to PhantomUnleashed (config section is now `[PhantomUnleashed]`).
 - Existing `[MorePhantoms]` settings are no longer read; re-enable the feature through the launcher or rename the section to `[PhantomUnleashed]`.
-- mctde-Link now runs through the mctde launcher: starting the game directly reopens the launcher instead.
+- mctde-Link now detects when Steam launches the game directly and relaunches it from its folder so the modded path is always used (a plain double-click of the exe is left alone).
 - If the launcher is missing, mctde-Link offers to download and install it from GitHub over HTTPS, verified by hash, only with your consent.
 - Added `[Launcher] RequireLauncher` (default on) to turn the launcher requirement off.
 
