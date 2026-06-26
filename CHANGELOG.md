@@ -2,10 +2,10 @@
 
 ## v0.4.0 — SplitBanner
 
-- New full-window banner backgrounds for both themes: a split black/cream "Dark Souls: Prepare To Die Edition" design with the Artorias figure, an "mctde" subtitle, and the character zoomed in and anchored to the top-right.
-- Light and dark each get their own banner (the split and figure mirror between themes).
-- Left-column checkboxes (Phantom, Practice, DSFix, Auto-Launch DSCM) aligned with the Dark Mode checkbox.
-- Fixed the Auto-Update label vanishing: it sits over the banner's inverse-shaded half, so its text is now coloured to contrast with that half in each theme.
+- New full-window banner artwork for both themes, replacing the previous gray-art banner: the "Dark Souls: Prepare To Die Edition" logo and Artorias figure over a black/cream split (mirrored between light and dark), with an "mctde" subtitle, zoomed in and anchored to the top-right.
+- Aligned the left-column checkboxes (Phantom, Practice, DSFix, Auto-Launch DSCM) with the Dark Mode checkbox.
+- Fixed the Auto-Update label disappearing where it overlaps the banner's inverse-shaded half — its text now contrasts with that half in each theme.
+- Refreshed the bundled mctde-Link changelog so the offline Changelog view includes Link 0.4.3 (Reversal), 0.4.4 (Homecoming), and 0.4.5 (Clean Exit).
 
 ## v0.3.2
 
