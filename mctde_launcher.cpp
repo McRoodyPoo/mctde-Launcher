@@ -37,7 +37,7 @@
 
 // This launcher's own version. Bump on each launcher release and keep latest.txt's
 // mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.4.0";
+static const char* LAUNCHER_VERSION = "0.4.1";
 
 // ------------------------------------------------------------ control IDs
 #define IDC_CHK_PHANTOM  1001
@@ -57,6 +57,8 @@ static const char* LAUNCHER_VERSION = "0.4.0";
 // Short-lived timer that keeps a just-launched DSCM window behind the launcher (its window
 // appears a moment after launch, landing on top, so we sink it back for a few seconds).
 #define IDT_DSCM_FRONT 2
+// Ticks once a second to refresh the top-left date/time readout.
+#define IDT_CLOCK 3
 
 // Where the greyed-out practice-tool row links when the tool isn't bundled.
 // Eloise's PTDE Practice Tool (tasrunner branch).
@@ -127,6 +129,7 @@ static bool g_dscmReady   = false;      // a launchable DSCM.exe path is known
 static DWORD g_dscmPid    = 0;          // pid of a DSCM we launched (to keep it behind us)
 static int  g_dscmFrontTicks = 0;       // IDT_DSCM_FRONT countdown
 static HWND g_lblVersion  = nullptr;
+static HWND g_lblClock    = nullptr;     // live date/time readout in the top-left corner
 static std::string g_latestLink, g_latestLauncher;  // filled by the update thread
 static HWND g_lnkPractice = nullptr;   // shown instead of a label when the tool isn't bundled
 static HFONT g_linkFont   = nullptr;   // underlined font for the link
@@ -299,6 +302,19 @@ static void SetPhantom(bool on) {
                                PathIn(L"mctde-link.ini").c_str());
 }
 
+// AA opt-in. By default the launcher forces DSFix antialiasing OFF before every launch:
+// SMAA (its stencil-masked edge blend) and SSAO collide with the in-frame overlay and smear
+// the world render with red/yellow garbage until a device reset. A user can deliberately
+// re-enable AA from the DSFix config's Advanced Options, which sets this flag; the launch-time
+// force-off then leaves their choice alone. Default 0 = AA enforced off.
+static bool AaOptIn() {
+    return GetPrivateProfileIntW(L"Launcher", L"AllowAA", 0, PathIn(L"mctde-link.ini").c_str()) != 0;
+}
+static void SetAaOptIn(bool on) {
+    WritePrivateProfileStringW(L"Launcher", L"AllowAA", on ? L"1" : L"0",
+                               PathIn(L"mctde-link.ini").c_str());
+}
+
 // ------------------------------------------------------------ optional-DLL enable/disable (rename)
 // A toggleable DLL is "active" under its real name and "parked" as <name>.off when disabled.
 // We never delete it, only rename. The chainloader's *.dll scan (and the game's wrapper loader)
@@ -410,6 +426,16 @@ static bool LaunchGame() {
     // Mark the game process as launcher-spawned so mctde-Link's launcher guard lets it run
     // (the child inherits this env var). Without it, the mod relaunches the launcher and quits.
     SetEnvironmentVariableW(L"MCTDE_VIA_LAUNCHER", L"1");
+
+    // Unless the user opted into AA via the DSFix config's Advanced Options, force antialiasing
+    // off in dsfix.ini before launch -- SMAA/SSAO collide with the overlay and corrupt the world
+    // render. Only rewrites when it's actually on; harmless if DSFix isn't installed.
+    if (!AaOptIn() && FileExists(DsfixIniPath())) {
+        std::string ini = ReadFileUtf8(DsfixIniPath());
+        if (DsfixGet(ini, "aaType", "SMAA") != "none")
+            WriteFileUtf8(DsfixIniPath(), DsfixSet(ini, "aaType", "none"));
+    }
+
     const wchar_t* exes[] = { L"DARKSOULS.exe", L"DATA.exe" };
     for (const wchar_t* exe : exes) {
         std::wstring full = PathIn(exe);
@@ -677,7 +703,12 @@ static void LayoutDsfix(HWND hWnd) {
     mv(U.hdrVideo, LX, y, 250, 18); y += HDR;
     mv(U.lblRes, LX, y + 3, 150); mv(U.rw, FX, y, 56, 22); mv(U.resX, FX + 60, y + 3, 10, 18); mv(U.rh, FX + 74, y, 56, 22); y += ROW;
     mv(U.lblOut, LX, y + 3, 150); mv(U.pw, FX, y, 56, 22); mv(U.outX, FX + 60, y + 3, 10, 18); mv(U.ph, FX + 74, y, 56, 22); y += ROW;
-    mv(U.lblAA, LX, y + 3, 28); mv(U.aaType, 48, y, 96, 200); mv(U.lblAAQ, 150, y + 3, 66); mv(U.aaQual, 220, y, 80, 200); y += ROW;
+    // AA is Advanced-only: by default the launcher forces it off before every launch (overlay
+    // collision), so it's hidden in basic mode and surfaced under Advanced for deliberate opt-in.
+    sh(U.lblAA, adv); sh(U.aaType, adv); sh(U.lblAAQ, adv); sh(U.aaQual, adv);
+    if (adv) {
+        mv(U.lblAA, LX, y + 3, 28); mv(U.aaType, 48, y, 96, 200); mv(U.lblAAQ, 150, y + 3, 66); mv(U.aaQual, 220, y, 80, 200); y += ROW;
+    }
     mv(U.lblSSAO, LX, y + 3, 40); mv(U.ssao, 58, y, 78, 200); mv(U.lblFilter, 150, y + 3, 110); mv(U.filter, 262, y, 110, 200); y += ROW;
     mv(U.border, LX, y, 250, 22); y += ROW;        // normal left checkbox
     mv(U.hudMod, LX, y, 250, 22); y += ROW;
@@ -789,8 +820,11 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         U.outX = DsMakeLabel(hWnd, L"x", 0, 0, 10);
         U.ph = DsMakeEdit(hWnd, IDC_DS_PH, G("presentHeight", "1080"), 0, 0, 56);
 
+        // Reflect the effective AA state: when the user hasn't opted in, the launch-time
+        // force-off keeps it at none regardless of what dsfix.ini currently says, so show none.
+        std::string aaInit = AaOptIn() ? G("aaType", "SMAA") : std::string("none");
         U.lblAA = DsMakeLabel(hWnd, L"AA", 0, 0, 28);
-        U.aaType = DsMakeCombo(hWnd, IDC_DS_AATYPE, 0, 0, 96, { L"none", L"SMAA", L"FXAA" }, G("aaType", "SMAA"));
+        U.aaType = DsMakeCombo(hWnd, IDC_DS_AATYPE, 0, 0, 96, { L"none", L"SMAA", L"FXAA" }, aaInit);
         U.lblAAQ = DsMakeLabel(hWnd, L"AA Quality", 0, 0, 66);
         U.aaQual = MakeMappedCombo(hWnd, IDC_DS_AAQUAL, 80, AAQ_LBL, AAQ_VAL, G("aaQuality", "4"));
 
@@ -802,7 +836,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         U.border = DsMakeCheck(hWnd, IDC_DS_BORDER, L"Borderless Fullscreen", G("borderlessFullscreen", "0") == "1");
         U.hudMod = DsMakeCheck(hWnd, IDC_DS_HUDMOD, L"HUD Mod (opens options)", g_hudEn == "1");
         // AA Quality is meaningless when antialiasing is off.
-        if (G("aaType", "SMAA") == "none") EnableWindow(U.aaQual, FALSE);
+        if (aaInit == "none") EnableWindow(U.aaQual, FALSE);
 
         U.hdrOther = DsMakeLabel(hWnd, L"--- Other ---", 0, 0, 250);
         U.skipIntro = DsMakeCheck(hWnd, IDC_DS_SKIP, L"Skip intro", G("skipIntro", "1") == "1");
@@ -910,8 +944,16 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
             put("renderWidth", "1920", CtlText(U.rw));   put("renderHeight", "1080", CtlText(U.rh));
             put("presentWidth", "1920", CtlText(U.pw));  put("presentHeight", "1080", CtlText(U.ph));
-            put("aaType", "SMAA", CtlCombo(U.aaType));
-            put("aaQuality", "4", CtlCombo(U.aaType) == "none" ? std::string("0") : MappedValue(U.aaQual, AAQ_VAL));
+            // Antialiasing is Advanced-only. In basic mode AA isn't shown and we don't touch it
+            // or the opt-in flag (so a power user's prior opt-in survives a basic-mode save); the
+            // launch-time force-off handles it. Only when the user is in Advanced do we write their
+            // AA choice and record whether they've opted in, which the force-off then respects.
+            if (g_advanced) {
+                std::string aa = CtlCombo(U.aaType);
+                put("aaType", "SMAA", aa);
+                put("aaQuality", "4", aa == "none" ? std::string("0") : MappedValue(U.aaQual, AAQ_VAL));
+                SetAaOptIn(aa != "none");
+            }
             put("ssaoStrength", "0", MappedValue(U.ssao, SSAO_VAL));
             put("filteringOverride", "0", MappedValue(U.filter, FILT_VAL));
             put("borderlessFullscreen", "0", chk(U.border));
@@ -1303,6 +1345,17 @@ static void UpdateLauncherAndRelaunch() {
     ExitProcess(0);
 }
 
+// Refresh the top-left date/time line from the system clock, using the user's locale formats.
+static void SetClockLabel() {
+    if (!g_lblClock) return;
+    SYSTEMTIME st; GetLocalTime(&st);
+    wchar_t date[80] = {0}, time[80] = {0};
+    GetDateFormatW(LOCALE_USER_DEFAULT, DATE_LONGDATE, &st, nullptr, date, 80);
+    GetTimeFormatW(LOCALE_USER_DEFAULT, 0, &st, nullptr, time, 80);
+    std::wstring s = std::wstring(date) + L"    " + time;
+    SetWindowTextW(g_lblClock, s.c_str());
+}
+
 static void SetVersionLabel(HWND hWnd) {
     std::string link = LinkInstalledVersion(); if (link.empty()) link = "?";
     std::string s = std::string("Launcher ") + LAUNCHER_VERSION + "      Link " + link;
@@ -1486,9 +1539,14 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         g_chkDscm = CreateWindowW(L"BUTTON", L"Searching for DSCM...",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 238, 288, 22,
             hWnd, (HMENU)IDC_CHK_DSCM, g_inst, nullptr);
-        // Version line in the empty top-left corner (the banner art sits top-right).
-        g_lblVersion = CreateWindowW(L"STATIC", L"",
+        // Live date/time in the empty top-left corner (the banner art sits top-right).
+        g_lblClock = CreateWindowW(L"STATIC", L"",
             WS_CHILD | WS_VISIBLE | SS_LEFT, 14, 10, 300, 16,
+            hWnd, nullptr, g_inst, nullptr);
+        // Version line, just under the date/time. Paints transparently over the banner
+        // with the theme text colour, same as the date/time line.
+        g_lblVersion = CreateWindowW(L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE | SS_LEFT, 14, 28, 300, 16,
             hWnd, nullptr, g_inst, nullptr);
         // Auto-Update checkbox, left-aligned with the PLAY button below it.
         g_chkAutoUpdate = CreateWindowW(L"BUTTON", L"Auto-Update",
@@ -1508,12 +1566,14 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             hWnd, (HMENU)IDC_BTN_PLAY, g_inst, nullptr);
 
         for (HWND h : { g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice, g_chkDscm,
-                        g_chkAutoUpdate, g_chkDark, g_lblVersion, chlog, exit, play })
+                        g_chkAutoUpdate, g_chkDark, g_lblVersion, g_lblClock, chlog, exit, play })
             SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
 
         SendMessageW(g_chkAutoUpdate, BM_SETCHECK, AutoUpdateEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(g_chkDark, BM_SETCHECK, g_dark ? BST_CHECKED : BST_UNCHECKED, 0);
         SetVersionLabel(hWnd);   // installed versions immediately; refreshed when latest.txt lands
+        SetClockLabel();         // show the time at once, then tick it every second
+        SetTimer(hWnd, IDT_CLOCK, 1000, nullptr);
         if (HANDLE ut = CreateThread(NULL, 0, UpdateThread, hWnd, 0, NULL)) CloseHandle(ut);
 
         // initial state from disk
@@ -1560,6 +1620,11 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         if (wParam == IDT_DSCM_POLL) {
             if (!g_dscmReady) RefreshDscmRow(hWnd);
             if (g_dscmReady) KillTimer(hWnd, IDT_DSCM_POLL);
+            return 0;
+        }
+        if (wParam == IDT_CLOCK) {
+            SetClockLabel();
+            RepaintOverBg(g_lblClock);   // clear any ghost of the previous time over the banner
             return 0;
         }
         if (wParam == IDT_DSCM_FRONT) {

@@ -1,5 +1,10 @@
 # mctde-Launcher Changelog
 
+## v0.4.1 — AliasArmistice
+
+- DSFix antialiasing is now forced off before every launch. SMAA (and SSAO) collide with the in-frame overlay and smear the 3D world with red/yellow corruption that only a resolution change clears; keeping AA off sidesteps the collision entirely.
+- Moved the AA type and quality controls out of the basic DSFix config into Advanced Options. A deliberate AA choice made there is remembered ([Launcher] AllowAA) and respected — the launch-time force-off then leaves it alone — so you can opt back in at your own risk.
+
 ## v0.4.0 — SplitBanner
 
 - New full-window banner artwork for both themes, replacing the previous gray-art banner: the "Dark Souls: Prepare To Die Edition" logo and Artorias figure over a black/cream split (mirrored between light and dark), with an "mctde" subtitle, zoomed in and anchored to the top-right.
