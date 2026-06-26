@@ -37,7 +37,7 @@
 
 // This launcher's own version. Bump on each launcher release and keep latest.txt's
 // mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.3.2";
+static const char* LAUNCHER_VERSION = "0.4.0";
 
 // ------------------------------------------------------------ control IDs
 #define IDC_CHK_PHANTOM  1001
@@ -255,7 +255,12 @@ static bool ThemeHandle(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, LRESU
         // fall through to the generic static/button colouring
     case WM_CTLCOLORBTN:
         if (BgActive(hWnd)) {                            // let the banner show through the control
-            SetTextColor((HDC)wParam, ThText());
+            // The Auto-Update checkbox sits over the banner's right half, which is the inverse
+            // shade of the theme (cream in dark mode, black in light). Colour its text to contrast
+            // with that half instead of the theme, or it vanishes into the background.
+            SetTextColor((HDC)wParam, (HWND)lParam == g_chkAutoUpdate
+                                          ? (g_dark ? RGB(20, 20, 20) : RGB(230, 230, 230))
+                                          : ThText());
             SetBkMode((HDC)wParam, TRANSPARENT);
             *result = (LRESULT)GetStockObject(NULL_BRUSH);
             return true;
@@ -1464,22 +1469,22 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         // Widths are sized to the text so the controls' opaque background doesn't paint over
         // the Artorias silhouette on the right.
         g_chkPhantom = CreateWindowW(L"BUTTON", L"PhantomUnleashed (uncommon)",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 120, 288, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 120, 288, 22,
             hWnd, (HMENU)IDC_CHK_PHANTOM, g_inst, nullptr);
         g_chkPractice = CreateWindowW(L"BUTTON", L"Eloise's PTDE Practice Tool",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 160, 200, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 160, 200, 22,
             hWnd, (HMENU)IDC_CHK_PRACTICE, g_inst, nullptr);
         // DSFix + Config sit at the bottom of the list.
         g_chkDsfix = CreateWindowW(L"BUTTON", L"DSFix",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 200, 64, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 200, 64, 22,
             hWnd, (HMENU)IDC_CHK_DSFIX, g_inst, nullptr);
         g_btnConfig = CreateWindowW(L"BUTTON", L"Config",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 92, 198, 72, 26,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 84, 198, 72, 26,
             hWnd, (HMENU)IDC_BTN_CONFIG, g_inst, nullptr);
         // Auto-Launch DSCM (Dark Souls Connectivity Mod). Greyed as "Searching for DSCM..."
         // until DSCM.exe is found in the DATA folder (or copied in from a running instance).
         g_chkDscm = CreateWindowW(L"BUTTON", L"Searching for DSCM...",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 238, 288, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 238, 288, 22,
             hWnd, (HMENU)IDC_CHK_DSCM, g_inst, nullptr);
         // Version line in the empty top-left corner (the banner art sits top-right).
         g_lblVersion = CreateWindowW(L"STATIC", L"",
@@ -1534,7 +1539,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             EnableWindow(g_chkPractice, FALSE);
 
             g_lnkPractice = CreateWindowW(L"STATIC", L"Eloise's PTDE Practice Tool",
-                WS_CHILD | WS_VISIBLE | SS_NOTIFY, 46, 161, 248, 20,
+                WS_CHILD | WS_VISIBLE | SS_NOTIFY, 38, 161, 248, 20,
                 hWnd, (HMENU)IDC_LNK_PRACTICE, g_inst, nullptr);
             SendMessageW(g_lnkPractice, WM_SETFONT, (WPARAM)g_linkFont, TRUE);
             g_origStaticProc = (WNDPROC)SetWindowLongPtrW(g_lnkPractice, GWLP_WNDPROC, (LONG_PTR)LinkProc);

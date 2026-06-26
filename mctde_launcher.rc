@@ -7,8 +7,9 @@ IDI_APPICON ICON "mctde.ico"
 IDB_ARTORIAS BITMAP "artorias.bmp"
 
 // Full pre-composed banners used as the whole-window background, replacing the programmatic
-// header in that theme. Dark: gray art over a black|tan split. Light: gray art over light grey,
-// pre-letterboxed onto the 524x369 client so it fills without stretching.
+// header in that theme. Both are the "Dark Souls: Prepare To Die Edition" logo + Artorias figure
+// over a black|cream split (mirrored between themes) with an "mctde" subtitle, zoomed in and
+// anchored to the top-right, fit 1:1 to the 524x346 client so they fill without stretching.
 IDB_BG_DARK  BITMAP "mctde_bg_dark.bmp"
 IDB_BG_LIGHT BITMAP "mctde_bg_light.bmp"
 

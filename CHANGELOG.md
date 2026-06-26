@@ -1,5 +1,12 @@
 # mctde-Launcher Changelog
 
+## v0.4.0 — SplitBanner
+
+- New full-window banner backgrounds for both themes: a split black/cream "Dark Souls: Prepare To Die Edition" design with the Artorias figure, an "mctde" subtitle, and the character zoomed in and anchored to the top-right.
+- Light and dark each get their own banner (the split and figure mirror between themes).
+- Left-column checkboxes (Phantom, Practice, DSFix, Auto-Launch DSCM) aligned with the Dark Mode checkbox.
+- Fixed the Auto-Update label vanishing: it sits over the banner's inverse-shaded half, so its text is now coloured to contrast with that half in each theme.
+
 ## v0.3.2
 
 - Detect DSCM.exe sitting in the DATA folder beside the launcher, so the Auto-Launch DSCM row lights up even when DSCM isn't already running and no path has been remembered yet. (DSCM is still launched in place and never copied/moved.)

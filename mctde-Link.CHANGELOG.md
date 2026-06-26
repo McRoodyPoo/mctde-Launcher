@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.5 - Clean Exit
+
+- When the game is started without the launcher (Steam-direct launch or a folder double-click), the mod still closes the game and reopens the launcher — but now spawns the launcher outside Steam's kill-on-close job. Previously the reopened launcher stayed in Steam's process tree, so Steam kept counting the game as running even after it closed; now Steam registers the close.
+
 ## v0.4.4 - Homecoming
 
 - Fixed the launcher not reopening after a mod auto-update.
@@ -15,7 +19,7 @@
 
 - Renamed the in-game phantom-cap feature from MorePhantoms to PhantomUnleashed (config section is now `[PhantomUnleashed]`).
 - Existing `[MorePhantoms]` settings are no longer read; re-enable the feature through the launcher or rename the section to `[PhantomUnleashed]`.
-- mctde-Link now detects when Steam launches the game directly and relaunches it from its folder so the modded path is always used (a plain double-click of the exe is left alone).
+- mctde-Link now runs through the mctde launcher: starting the game directly reopens the launcher instead.
 - If the launcher is missing, mctde-Link offers to download and install it from GitHub over HTTPS, verified by hash, only with your consent.
 - Added `[Launcher] RequireLauncher` (default on) to turn the launcher requirement off.
 
