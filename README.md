@@ -6,17 +6,17 @@ prefix as the game.
 
 It sits in the game's `DATA` folder beside `DARKSOULS.exe` and provides:
 
-- **Increased Phantom Limit** — writes `[PhantomUnleashed] Mode=On/Off` to `mctde-link.ini`
+- **Increased Phantom Limit**: writes `[PhantomUnleashed] Mode=On/Off` to `mctde-link.ini`
   (the only way to opt in under Proton, where the in-game prompt is suppressed).
-- **Eloise's PTDE Practice Tool** — toggles the chainloaded `dinput8.dll` in
+- **Eloise's PTDE Practice Tool**: toggles the chainloaded `dinput8.dll` in
   `mctde-Link_Chainload`; links to the latest release when not installed.
-- **DSFix** — toggles DSFix (`dinput8.dll` ↔ `dinput8.dll.off`) and opens a settings panel
+- **DSFix**: toggles DSFix (`dinput8.dll` ↔ `dinput8.dll.off`) and opens a settings panel
   that round-trips `dsfix.ini` (with an Advanced Options mode).
-- **Auto-Launch DSCM** — starts the Dark Souls Connectivity Mod (`DSCM.exe`) behind the
+- **Auto-Launch DSCM**: starts the Dark Souls Connectivity Mod (`DSCM.exe`) behind the
   launcher when it opens (or when you tick the box), skipping it if it's already running. DSCM
   is run in place from its own folder so its self-updater keeps working; the launcher learns
   its path from a running instance, so the row stays greyed *Searching for DSCM…* until found.
-- **PLAY / Exit** — launches `DARKSOULS.exe` in the same directory.
+- **PLAY / Exit**: launches `DARKSOULS.exe` in the same directory.
 
 ## Build
 
