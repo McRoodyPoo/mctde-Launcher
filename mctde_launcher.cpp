@@ -2342,6 +2342,26 @@ static DWORD WINAPI UpdateThread(LPVOID param) {
     return 0;
 }
 
+// Update mctde-Link to its latest release in the background, used when the Auto-Update box is
+// ticked at runtime (so checking the box updates Link right away, like the Auto-Launch DSCM box
+// acts on tick). Fetches latest.txt if the startup check hasn't populated it yet, then swaps
+// d3d9.dll only when the installed Link is actually older. The launcher's own self-update stays
+// on the startup path -- replacing the running exe mid-session would force an immediate relaunch.
+static DWORD WINAPI LinkUpdateThread(LPVOID param) {
+    HWND main = (HWND)param;
+    if (g_latestLink.empty()) {
+        std::string manifest;
+        if (HttpsGet(L"raw.githubusercontent.com", L"/McRoodyPoo/mctde-Link/main/latest.txt", manifest)) {
+            g_latestLink = ParseKv(manifest, "mctde-link");
+            g_latestLauncher = ParseKv(manifest, "mctde-launcher");
+        }
+    }
+    std::string instLink = LinkInstalledVersion();
+    bool linkOut = !g_latestLink.empty() && !instLink.empty() && CmpVer(g_latestLink, instLink) > 0;
+    if (linkOut && UpdateLink() && IsWindow(main)) PostMessageW(main, WM_VERSIONS_READY, 0, 0);
+    return 0;
+}
+
 // ------------------------------------------------------------ DSCM (Dark Souls Connectivity Mod / DaS-PC-MPChan)
 // DSCM.exe is the connectivity mod's launcher, and it self-updates in place. So we never copy
 // it into the DATA folder (a stale copy would just run the un-updated base build); instead we
@@ -2617,6 +2637,15 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         case IDC_BTN_CHANGELOG: OpenChangelog(hWnd);   return 0;
         case IDC_BTN_PLAY:      ApplyAnd(hWnd, true);  return 0;
         case IDC_BTN_EXIT:      ApplyAnd(hWnd, false); return 0;
+        case IDC_CHK_AUTOUPDATE:
+            // Persist the toggle immediately, and on enable kick a background mctde-Link update so
+            // ticking the box updates Link right away instead of waiting for the next launch.
+            SetAutoUpdate(CtlChecked(g_chkAutoUpdate));
+            if (CtlChecked(g_chkAutoUpdate)) {
+                HANDLE t = CreateThread(nullptr, 0, LinkUpdateThread, hWnd, 0, nullptr);
+                if (t) CloseHandle(t);
+            }
+            return 0;
         case IDC_CHK_DSCM:
             // Ticking the box starts DSCM right away (if it isn't already running).
             if (CtlChecked(g_chkDscm) && !DscmRunning()) {
