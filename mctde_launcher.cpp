@@ -24,6 +24,8 @@
 #include <vector>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
+#include <commctrl.h>
 #include "resource.h"
 
 #pragma comment(lib, "user32.lib")
@@ -31,13 +33,14 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "version.lib")
+#pragma comment(lib, "comctl32.lib")
 
 #define WM_CHANGELOG_READY (WM_APP + 1)
 #define WM_VERSIONS_READY  (WM_APP + 2)
 
 // This launcher's own version. Bump on each launcher release and keep latest.txt's
 // mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.4.1";
+static const char* LAUNCHER_VERSION = "0.5.0";
 
 // ------------------------------------------------------------ control IDs
 #define IDC_CHK_PHANTOM  1001
@@ -98,6 +101,7 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 #define IDC_DS_FSHZ      2032
 #define IDC_DS_SAVE      2011
 #define IDC_DS_CANCEL    2012
+#define IDC_DS_REVERT    2013
 // HUD Mod sub-window
 #define IDC_HUD_EN       2060
 #define IDC_HUD_MIN      2061
@@ -107,6 +111,32 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 #define IDC_HUD_CANCEL   2065
 #define IDC_HUD_LBL_SCALE 2066
 #define IDC_HUD_LBL_OP    2067
+
+// Hide Souls Counter (Advanced): toggles the mctde-link [HideSoulCounter] code patch. With
+// HideBox=1 it clears the soul dialog's draw-enable byte ([this+0x98]) every frame, hiding the
+// ENTIRE bottom-right soul display -- box/plate + icon + number + "+N" popup -- leaving the
+// corner empty. Code-only (no DSFix HUD Mod, no texture edits); reversible on game close.
+#define IDC_DS_HIDESOUL   2070
+
+// Main-window "mctde Settings" button + its dialog.
+#define IDC_BTN_MCTDE     1012
+#define IDC_MC_ADV        2200
+#define IDC_MC_SAVE       2201
+#define IDC_MC_CANCEL     2202
+#define IDC_MC_FONT       2203
+#define IDC_MC_SIZE       2204
+#define IDC_MC_CORNER     2205
+#define IDC_MC_PADX       2206
+#define IDC_MC_PADY       2207
+#define IDC_MC_SHOWHDR    2208
+#define IDC_MC_SHOWHP     2209
+#define IDC_MC_SHOWPING   2210
+#define IDC_MC_SHOWNAME   2211
+#define IDC_MC_FORCETOP   2212
+#define IDC_MC_PREVIEW    2213
+#define IDC_MC_HPBARS     2214
+#define IDC_MC_HPSIZE     2215
+#define IDC_MC_DYN        2300   // base for the data-driven settings table (2300..)
 
 static HINSTANCE g_inst = nullptr;
 static HFONT     g_uiFont = nullptr;     // standard control font
@@ -298,8 +328,15 @@ static bool PhantomEnabled() {
     return _wcsicmp(buf, L"On") == 0;
 }
 static void SetPhantom(bool on) {
-    WritePrivateProfileStringW(L"PhantomUnleashed", L"Mode", on ? L"On" : L"Off",
-                               PathIn(L"mctde-link.ini").c_str());
+    const std::wstring ini = PathIn(L"mctde-link.ini");
+    WritePrivateProfileStringW(L"PhantomUnleashed", L"Mode", on ? L"On" : L"Off", ini.c_str());
+    // The in-game engine reads VerifyOnly with a default that means "log only, never patch", so a
+    // section that holds only Mode= silently does nothing. Make sure the apply switch is present
+    // (only ever write it absent -> 0; never clobber a user who set it to 1 on a suspect exe).
+    wchar_t vo[8] = {0};
+    GetPrivateProfileStringW(L"PhantomUnleashed", L"VerifyOnly", L"", vo, 8, ini.c_str());
+    if (vo[0] == L'\0')
+        WritePrivateProfileStringW(L"PhantomUnleashed", L"VerifyOnly", L"0", ini.c_str());
 }
 
 // AA opt-in. By default the launcher forces DSFix antialiasing OFF before every launch:
@@ -377,6 +414,231 @@ static void WriteFileUtf8(const std::wstring& path, const std::string& data) {
 }
 static std::wstring DsfixIniPath() { return PathIn(L"dsfix.ini"); }
 
+// The full, documented default mctde-link.ini. SINGLE SOURCE OF TRUTH for a freshly-generated
+// config: if the user deletes their ini, we rewrite THIS so they get every section + comment
+// back, not a bare-bones file pieced together one key at a time by the first WritePrivateProfile
+// call. Keep in sync with samples/mctde-link.sample.ini.
+static const char* const kDefaultIni =
+R"INI([Settings]
+EnableLogging=0
+; Force a clean process exit when the game window closes, so the overlay's background threads
+; can't leave a lingering "zombie" DARKSOULS.exe behind. Leave at 1 unless it ever exits early.
+ExitWithGame=1
+
+[Launcher]
+; 1 = if the game is started WITHOUT mctde_launcher.exe, close the game and open the launcher
+; instead, so you always go through it. Only enforced when mctde_launcher.exe is present next
+; to the game; set to 0 to allow launching the game directly.
+RequireLauncher=1
+
+[PhantomUnleashed]
+; Built-in phantom-cap raiser. Rewrite of Metal-Crow's MultiPhantom/Overhaul patch on
+; mctde-Link's patch engine; offset facts credited to his reverse-engineering work.
+; Mode = Ask | On | Off
+;   Ask = show a Yes/No box every launch (default).
+;   On  = always enable, no prompt.   Off = never enable, no prompt.
+; LINUX / PROTON: the Ask prompt is NOT supported and is skipped (PhantomUnleashed stays off).
+;   You MUST set Mode=On or Mode=Off manually on Proton.
+; IMPORTANT: while enabled you can ONLY connect with other players who also have
+;   PhantomUnleashed enabled. Disabled = vanilla matchmaking with everyone.
+Mode=Ask
+; Total player slots in your world (stock is 4). KEEP THIS AT 18 for a stable >4 session:
+; the Stage 2 offset-shift trampolines are calibrated for 18. Other values (4-32) apply
+; only the Stage 1 cap + pool segregation and will NOT be a stable large session.
+MaxPhantoms=18
+; Matchmaking pool key (1 byte). The game only connects players whose NetworkVersion
+; matches, so this is what segregates you from the vanilla pool. Vanilla retail = 0x2E.
+; Default 0x4D = the PhantomUnleashed pool. ALL players in a session must share the SAME
+; NetworkVersion *and* MaxPhantoms. Accepts hex (0x4D) or decimal (77). Set 0x2E to
+; deliberately rejoin the vanilla pool (no segregation).
+NetworkVersion=0x4D
+; Game internal memory pool, in MB. Stock DS1 allocates only ~10 MB, which is sized for 4
+; players and runs out once many phantoms load their models/gear/animations. Raised so an
+; 18-phantom session has room. Range 0-255 (0 = leave stock). 192 is a safe default.
+MemoryPoolMB=192
+; SAFETY/DIAGNOSTIC: 0 = apply the patches when enabled (normal). 1 = only write the offset
+;   self-check to PhantomUnleashed.log and never modify the game (use if you suspect a bad exe).
+VerifyOnly=0
+
+[HideSoulCounter]
+; Hides the NUMBER on the bottom-right HUD soul counter. The soul icon and the rest of
+; the HUD stay; only the digits stop being drawn. Reversible (reverts on game close).
+; How it works: a single JZ->JMP byte flip in the F20 soul_param widget, located by a
+; signature that is unique in the exe -- so it's safe across relocation. It only forces a
+; code path the game already runs every frame your souls aren't changing.
+; Enabled: 0 = off (default), 1 = on.
+Enabled=0
+; HideGainPopup: also suppress the transient "+N souls gained" popup that flashes on load-in
+;   and when you pick up souls. 1 = hide it too (default), 0 = leave it.
+HideGainPopup=1
+; HideBox: hide the ENTIRE bottom-right soul display -- box/plate + soul icon + number + the
+;   "+N" popup -- leaving the corner empty. Works by clearing the soul dialog's own draw-enable
+;   byte every frame (the soul widget's per-frame update has the dialog object in hand), so the
+;   dialog draws none of its children. Per-object, so no other HUD element or menu is affected;
+;   no DSFix and no texture edits. When 1 it supersedes the number/popup hides above (a hidden
+;   dialog draws neither). 0 = keep the box, hide only the number/popup (default); 1 = hide all.
+HideBox=0
+; HideRegion: the robust way to hide the WHOLE bottom-right soul counter (box + number + popup)
+;   with no DSFix and no texture edits. Link wraps the D3D9 device; when this is on it drops the
+;   game's 2D HUD draws (pre-transformed XYZRHW quads) whose every vertex lands in the bottom-
+;   right rectangle below. No render capture/recomposite, so unlike DSFix HUD Mod it does NOT go
+;   boxy during fades. 0 = off (default), 1 = on. (Your own overlay is drawn separately and is
+;   never affected.)
+HideRegion=0
+; RegionX / RegionY: top-left corner of that kill rectangle, as a fraction of screen width/height
+;   (the rect runs from here to the bottom-right corner). Defaults 0.78 / 0.78 cover the soul
+;   counter only. Raise toward 1.0 to shrink the rect if it clips something else; lower to grow it.
+RegionX=0.78
+RegionY=0.78
+; SAFETY/DIAGNOSTIC: 1 = only write the self-check to HideSoulCounter.log, never modify the
+;   game (default). Set to 0 (with Enabled=1) to actually hide the number.
+VerifyOnly=1
+
+[Controller]
+; First-launch controller helper. We run under Steam appid 480 (Spacewar), whose
+; stock "Official Configuration" doesn't map to a real pad, so controllers look
+; dead until you apply Steam's "Gamepad" template. When enabled, on the first
+; launch that finds a connected controller we pop the Steam binding panel once
+; (Browse Configs -> Templates -> Gamepad), then never again (a marker file
+; records it). Keyboard/mouse users are never nudged.
+; Requires a modern steam_api.dll shipped beside d3d9.dll as BindingNudgeModule
+; (PTDE's own steam_api.dll is too old to open the panel).
+BindingNudge=1
+; Re-show every launch, ignoring the once-done marker (testing only).
+BindingNudgeForce=0
+; Filename of the modern Steam DLL we drive (ships next to d3d9.dll).
+BindingNudgeModule=mctde_input.dll
+; Steam interface version strings. These MUST match the SDK that BindingNudgeModule
+; was built from (its flat wrappers call a vtable slot baked for that version).
+; The shipped mctde_input.dll uses SteamInput002 / SteamClient020 -- only change
+; these if you swap in a different steam_api.dll build.
+BindingNudgeInputVersion=SteamInput002
+BindingNudgeClientVersion=SteamClient020
+; Delay (ms) after overlay start before nudging, so Steam's overlay/input settle.
+BindingNudgeWaitMs=9000
+; How long (ms) to wait for a controller to appear before giving up for this launch.
+BindingNudgeControllerTimeoutMs=6000
+; Optional manual re-trigger key (Windows virtual-key code; 0 = off). Opens the
+; binding panel on demand if the first-launch timing missed. e.g. F10 = 0x79.
+BindingNudgeKey=0
+
+[Compatibility]
+ChainloadFolder=mctde-Link_Chainload
+
+[DLLs]
+GenericDLL0=
+GenericDLL1=
+GenericDLL2=
+GenericDLL3=
+GenericDLL4=
+GenericDLL5=
+GenericDLL6=
+GenericDLL7=
+GenericDLL8=
+GenericDLL9=
+
+[Render]
+; Backend = d3d (in-frame overlay, no stutter; drawn inside d3d9.dll itself --
+;   no companion DLL needed) or gdi (old separate-window fallback).
+; NOTE: the old mctde_overlay.dll companion is obsolete as of 0.1.3. If one is
+;   left over in your ChainloadFolder it is ignored automatically -- you can delete it.
+Backend=d3d
+; How often (ms) the overlay bitmap is refreshed (16-500). 66 = ~15 Hz.
+SubmitMs=66
+; --- gdi-backend-only option (ignored when Backend=d3d) ---
+; GDI-window repaint interval ms (66 = ~15Hz; lower = smoother but more DWM cost).
+RepaintMs=66
+
+[Overlay]
+ShowHeader=1
+MarkerGutterExtra=8
+FontFace=Tahoma
+FontHeight=24
+HpFontHeight=24
+LineHeight=20
+Corner=top_left
+PaddingX=5
+PaddingY=5
+RefreshMs=1000
+HideLocal=0
+ForceTopmost=0
+; --- Master on/off hotkey ---
+; Show/hide the whole overlay. Fires only while the game window is focused.
+; Default is Shift+F3 (ToggleModifier=0x10 Shift, ToggleKey=0x72 F3) to avoid DSFix binds.
+; Values are Windows virtual-key codes, decimal or hex.
+;   Keys:      F3=0x72  F7=0x76  F8=0x77  F9=0x78  H=0x48  Insert=0x2D  ScrollLock=0x91
+;   Modifiers: Shift=0x10  Ctrl=0x11  Alt=0x12  (set ToggleModifier=0 for no modifier)
+ToggleModifier=0x10
+ToggleKey=0x72
+; --- Per-element display toggles (1=show, 0=hide) ---
+; These hide elements without affecting the underlying systems; changes hot-reload ~1s.
+; ShowHp also requires [HP] Enabled=1 (that switch gates HP polling entirely).
+ShowHp=1
+; HpBars: draw each player's HP as a Souls-style filled gauge (green->amber->red as it drops)
+;   instead of a number. 0 = numbers (default), 1 = bars. Needs a readable max HP for that row
+;   (falls back to the number when max HP isn't known, e.g. some remote players).
+HpBars=0
+ShowPing=1
+ShowName=1
+ShowLocalMarker=1
+; When a player leaves the session WITHOUT dying, keep their row as "Disconnected  ---MS  Name"
+; (greyed out) until a newcomer joins, who then replaces it. Set 0 to just drop the row instead.
+ShowDisconnected=1
+; --- Spacewar controller-setup instructions ---
+; Shows a step-by-step panel for setting up a controller via Steam's Spacewar config.
+; Visible by default (1). Pressing the hide bind (default Shift+F2, while the game window is
+; focused) hides the panel AND writes ShowControllerSetup=0 here, so it stays gone next launch.
+; Set back to 1 by hand to bring the instructions back.
+ShowControllerSetup=1
+ControllerSetupHideModifier=0x10
+ControllerSetupHideKey=0x71
+
+[HP]
+Enabled=1
+CurrentOffset=724
+MaxOffset=728
+OneHpLingerMs=500
+; DamageLingerMs: with [Overlay] HpBars=1, how long (ms) the yellow "just lost" chip lingers
+;   on an HP bar after a hit before it recedes to the new (green) HP level. Default 1000 (1s).
+DamageLingerMs=1000
+PollMs=33
+
+[Debug]
+DumpOverlayData=0
+DebugP2PBridge=0
+
+[WebSocket]
+Enabled=0
+Port=39876
+SendMs=33
+
+[TruePing]
+UseHighResTimer=0
+PollSleepMs=33
+DisplayMode=2
+BestWindow=8
+Enabled=1
+Debug=0
+PreferOverlay=1
+SendEnabled=1
+ReceiveEnabled=1
+Channel=63
+AllowGameChannel=0
+SendType=2
+SendMs=1000
+HelloMs=500
+StaleMs=4000
+)INI";
+
+// If mctde-link.ini is missing (e.g. the user deleted it), write the full documented default so
+// it regenerates complete rather than as a bare-bones file. Never touches an existing ini -- the
+// per-key writers and the in-game MigrateIni handle partial/legacy files.
+static void EnsureIniSeeded() {
+    const std::wstring ini = PathIn(L"mctde-link.ini");
+    if (!FileExists(ini))
+        WriteFileUtf8(ini, kDefaultIni);
+}
+
 // Trim leading whitespace, return first token (the key) of a config line; "" if comment/blank.
 static std::string LineKey(const std::string& line) {
     size_t i = 0;
@@ -422,10 +684,28 @@ static std::string DsfixSet(const std::string& text, const std::string& key, con
 }
 
 // ------------------------------------------------------------ launching the game
+// The launcher runs the game as Steam appid 480 (Spacewar) so Steam Input / controllers work.
+// PTDE's online matchmaking is keyed on that same appid, so EVERY install must agree on it: an
+// install left on PTDE's real appid (211420) lands in a pool with no other mctde players and
+// "can't connect to anyone". steam_appid.txt takes precedence over Steam's own env var, so we
+// force it to 480 here. Overwrite only when it isn't already 480 (avoid needless disk writes).
+static void EnsureSteamAppId() {
+    const std::wstring p = PathIn(L"steam_appid.txt");
+    std::string cur = FileExists(p) ? ReadFileUtf8(p) : std::string();
+    const size_t a = cur.find_first_not_of(" \t\r\n");
+    const size_t b = cur.find_last_not_of(" \t\r\n");
+    const std::string val = (a == std::string::npos) ? std::string() : cur.substr(a, b - a + 1);
+    if (val != "480")
+        WriteFileUtf8(p, "480");
+}
+
 static bool LaunchGame() {
     // Mark the game process as launcher-spawned so mctde-Link's launcher guard lets it run
     // (the child inherits this env var). Without it, the mod relaunches the launcher and quits.
     SetEnvironmentVariableW(L"MCTDE_VIA_LAUNCHER", L"1");
+
+    // Keep this install on the shared mctde matchmaking appid before the game's Steam init runs.
+    EnsureSteamAppId();
 
     // Unless the user opted into AA via the DSFix config's Advanced Options, force antialiasing
     // off in dsfix.ini before launch -- SMAA/SSAO collide with the overlay and corrupt the world
@@ -551,6 +831,12 @@ static const std::vector<std::wstring> SSAO_LBL = { L"Off", L"Medium", L"High", 
 static const std::vector<std::string>  SSAO_VAL = { "0", "1", "2", "3" };
 static const std::vector<std::wstring> FILT_LBL = { L"None", L"Bilinear", L"Anisotropic" };
 static const std::vector<std::string>  FILT_VAL = { "0", "1", "2" };
+// DSFix logLevel 0-11 (higher = more logging = more per-frame disk I/O). 0 = off, recommended
+// for play; the higher levels are debug-only and can cause frametime spikes.
+static const std::vector<std::wstring> LOG_LBL = {
+    L"Off (0)", L"1", L"2", L"3", L"4", L"5", L"6", L"7", L"8", L"9", L"10", L"11" };
+static const std::vector<std::string>  LOG_VAL = {
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11" };
 
 static HWND MakeMappedCombo(HWND parent, int id, int w,
                             const std::vector<std::wstring>& labels,
@@ -571,6 +857,14 @@ static std::string MappedValue(HWND h, const std::vector<std::string>& values) {
     if (s < 0 || s >= (int)values.size()) s = 0;
     return values[s];
 }
+// Select the combo entry whose visible label matches (case-insensitive). No-op if absent.
+static void SetCombo(HWND h, const wchar_t* label) {
+    int n = (int)SendMessageW(h, CB_GETCOUNT, 0, 0);
+    for (int i = 0; i < n; ++i) {
+        wchar_t b[64] = {0}; SendMessageW(h, CB_GETLBTEXT, i, (LPARAM)b);
+        if (_wcsicmp(b, label) == 0) { SendMessageW(h, CB_SETCURSEL, i, 0); return; }
+    }
+}
 
 static std::string g_dsText;        // loaded dsfix.ini contents, edited on save
 static bool g_advanced = false;     // Advanced Options toggle (per-open, not persisted)
@@ -589,13 +883,13 @@ struct DsUi {
     HWND border;
     HWND hudMod;
     HWND hdrCursor, capCur, disCur;
-    HWND hdrOther, skipIntro, logLvl;
+    HWND hdrOther, skipIntro, lblLog, logLvl;
     HWND hdrDinput, dinput[10];
     HWND hdrDof, lblDofRes, dofRes, disDofScale, lblDofBlur, dofBlur, defDof;
     HWND hdrFps, unlockFps, lblFpsLimit, fpsLimit, lblFpsThresh, fpsThresh, fpsStab;
     HWND hdrBackup, enBackup, lblBkpInt, bkpInt, lblBkpMax, bkpMax;
     HWND hdrNotReady, forceWin, enVsync, lblFsHz, fsHz;
-    HWND credit, save, cancel;
+    HWND credit, revert, save, cancel;
 };
 static DsUi U;
 
@@ -711,7 +1005,10 @@ static void LayoutDsfix(HWND hWnd) {
     }
     mv(U.lblSSAO, LX, y + 3, 40); mv(U.ssao, 58, y, 78, 200); mv(U.lblFilter, 150, y + 3, 110); mv(U.filter, 262, y, 110, 200); y += ROW;
     mv(U.border, LX, y, 250, 22); y += ROW;        // normal left checkbox
-    mv(U.hudMod, LX, y, 250, 22); y += ROW;
+    // HUD Mod is Advanced-only: its sub-window recomposites the whole HUD off the 3D scene
+    // (boxy/glitchy on cutscene fades), so it's a niche, opt-in tweak.
+    sh(U.hudMod, adv);
+    if (adv) { mv(U.hudMod, LX, y, 250, 22); y += ROW; }
 
     // --- Cursor ---
     mv(U.hdrCursor, LX, y, 250, 18); y += HDR;
@@ -719,7 +1016,7 @@ static void LayoutDsfix(HWND hWnd) {
 
     // --- Other ---
     mv(U.hdrOther, LX, y, 250, 18); y += HDR;
-    mv(U.skipIntro, LX, y, 180, 22); mv(U.logLvl, 200, y, 190, 22); y += ROW;
+    mv(U.skipIntro, LX, y, 180, 22); mv(U.lblLog, 200, y + 3, 66); mv(U.logLvl, 270, y, 96, 200); y += ROW;
 
     // --- Depth of Field ---
     mv(U.hdrDof, LX, y, 250, 18); y += HDR;
@@ -778,6 +1075,7 @@ static void LayoutDsfix(HWND hWnd) {
     }
 
     mv(U.credit, LX, y + 4, 370, 16); y += 26;
+    mv(U.revert, LX, y, 130, 28);
     mv(U.save, DS_CLIENTW - 164, y, 70, 28); mv(U.cancel, DS_CLIENTW - 86, y, 70, 28); y += 40;
 
     // resize the window to fit the laid-out content, then nudge it up if the (taller)
@@ -835,12 +1133,15 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
         U.border = DsMakeCheck(hWnd, IDC_DS_BORDER, L"Borderless Fullscreen", G("borderlessFullscreen", "0") == "1");
         U.hudMod = DsMakeCheck(hWnd, IDC_DS_HUDMOD, L"HUD Mod (opens options)", g_hudEn == "1");
+        // (Hide Soul Counter moved out of DSFix Config -> it's an mctde-Link feature, configured
+        //  in the "mctde Settings" dialog off the main launcher, not here.)
         // AA Quality is meaningless when antialiasing is off.
         if (aaInit == "none") EnableWindow(U.aaQual, FALSE);
 
         U.hdrOther = DsMakeLabel(hWnd, L"--- Other ---", 0, 0, 250);
         U.skipIntro = DsMakeCheck(hWnd, IDC_DS_SKIP, L"Skip intro", G("skipIntro", "1") == "1");
-        U.logLvl = DsMakeCheck(hWnd, IDC_DS_LOG, L"Logging", G("logLevel", "6") != "6");
+        U.lblLog = DsMakeLabel(hWnd, L"Log Level", 0, 0, 66);
+        U.logLvl = MakeMappedCombo(hWnd, IDC_DS_LOG, 96, LOG_LBL, LOG_VAL, G("logLevel", "6"));
 
         U.hdrCursor = DsMakeLabel(hWnd, L"--- Cursor ---", 0, 0, 250);
         U.capCur = DsMakeCheck(hWnd, IDC_DS_CAPCUR, L"Capture cursor", G("captureCursor", "1") == "1");
@@ -895,6 +1196,9 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
             L"DSFix by Durante - GPL-3.0. Source: github.com/PeterTh/dsfix",
             WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 370, 16, hWnd, nullptr, g_inst, nullptr);
         SendMessageW(U.credit, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        U.revert = CreateWindowW(L"BUTTON", L"Revert to Defaults", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+                                 0, 0, 130, 28, hWnd, (HMENU)IDC_DS_REVERT, g_inst, nullptr);
+        SendMessageW(U.revert, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
         U.save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
                                0, 0, 70, 28, hWnd, (HMENU)IDC_DS_SAVE, g_inst, nullptr);
         U.cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
@@ -933,6 +1237,92 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
             }
             return 0;
         }
+        // The basic "FPS Stabilizer" and advanced "Unlock FPS" checkboxes are two faces of
+        // the same unlockFPS key. Keep them in lockstep so flipping one (then switching modes
+        // or saving) doesn't leave the other showing the stale ini value and silently winning.
+        if (id == IDC_DS_FPSSTAB) {
+            bool on = CtlChecked(U.fpsStab);
+            SendMessageW(U.unlockFps, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+            SetWindowTextW(U.fpsLimit, L"30");   // basic mode pins the limit at 30 either way
+            return 0;
+        }
+        if (id == IDC_DS_UNLOCKFPS) {
+            SendMessageW(U.fpsStab, BM_SETCHECK,
+                         CtlChecked(U.unlockFps) ? BST_CHECKED : BST_UNCHECKED, 0);
+            return 0;
+        }
+        if (id == IDC_DS_REVERT) {
+            if (MessageBoxW(hWnd,
+                    L"Reset all DSFix settings to the launcher defaults?\n"
+                    L"Nothing is written to disk until you click Save.",
+                    L"Revert to Defaults", MB_YESNO | MB_ICONQUESTION) != IDYES)
+                return 0;
+            auto setChk = [&](HWND h, bool on) {
+                SendMessageW(h, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+            };
+            // Fill the visible form with the defaults.
+            SetWindowTextW(U.rw, L"1920"); SetWindowTextW(U.rh, L"1080");
+            SetWindowTextW(U.pw, L"0");    SetWindowTextW(U.ph, L"0");
+            SetCombo(U.aaType, L"none");   SetCombo(U.aaQual, L"Low");
+            SetCombo(U.ssao, L"Off");      SetCombo(U.filter, L"None");
+            setChk(U.border, true);
+            setChk(U.hudMod, false);
+            setChk(U.capCur, false);       setChk(U.disCur, true);
+            setChk(U.skipIntro, true);     SetCombo(U.logLvl, L"Off (0)");
+            SetWindowTextW(U.dofRes, L"540"); setChk(U.disDofScale, true); SetWindowTextW(U.dofBlur, L"1");
+            setChk(U.defDof, false);
+            setChk(U.unlockFps, false);    SetWindowTextW(U.fpsLimit, L"30"); SetWindowTextW(U.fpsThresh, L"28");
+            setChk(U.fpsStab, false);
+            setChk(U.enBackup, false);     SetWindowTextW(U.bkpInt, L"1500"); SetWindowTextW(U.bkpMax, L"10");
+            setChk(U.forceWin, false);     setChk(U.enVsync, false); SetWindowTextW(U.fsHz, L"60");
+            for (int i = 0; i < 10; ++i) SetCombo(U.dinput[i], L"none");
+            EnableWindow(U.aaQual, FALSE);   // AA none => quality is meaningless
+            // HUD Mod sub-window values (the main Save writes these from the globals).
+            g_hudEn = "0"; g_hudMin = "0"; g_hudScale = "1.0"; g_hudOpacity = "1.0";
+            // Also stamp the defaults straight into the loaded ini text. Save only writes a key
+            // when the form value differs from g_dsText, and basic mode skips DoF/FPS unless their
+            // toggle changed; seeding g_dsText here guarantees a Save lands the full default set
+            // regardless of which mode the dialog is in, while leaving unrelated keys untouched.
+            g_dsText = DsfixSet(g_dsText, "renderWidth", "1920");
+            g_dsText = DsfixSet(g_dsText, "renderHeight", "1080");
+            g_dsText = DsfixSet(g_dsText, "presentWidth", "0");
+            g_dsText = DsfixSet(g_dsText, "presentHeight", "0");
+            g_dsText = DsfixSet(g_dsText, "aaType", "none");
+            g_dsText = DsfixSet(g_dsText, "aaQuality", "1");
+            g_dsText = DsfixSet(g_dsText, "ssaoStrength", "0");
+            g_dsText = DsfixSet(g_dsText, "filteringOverride", "0");
+            g_dsText = DsfixSet(g_dsText, "borderlessFullscreen", "1");
+            g_dsText = DsfixSet(g_dsText, "captureCursor", "0");
+            g_dsText = DsfixSet(g_dsText, "disableCursor", "1");
+            g_dsText = DsfixSet(g_dsText, "skipIntro", "1");
+            g_dsText = DsfixSet(g_dsText, "logLevel", "0");
+            g_dsText = DsfixSet(g_dsText, "enableHudMod", "0");
+            g_dsText = DsfixSet(g_dsText, "enableMinimalHud", "0");
+            g_dsText = DsfixSet(g_dsText, "hudScaleFactor", "1.0");
+            g_dsText = DsfixSet(g_dsText, "hudOpacity", "1.0");
+            g_dsText = DsfixSet(g_dsText, "dofOverrideResolution", "540");
+            g_dsText = DsfixSet(g_dsText, "disableDofScaling", "1");
+            g_dsText = DsfixSet(g_dsText, "dofBlurAmount", "1");
+            g_dsText = DsfixSet(g_dsText, "unlockFPS", "0");
+            g_dsText = DsfixSet(g_dsText, "FPSlimit", "30");
+            g_dsText = DsfixSet(g_dsText, "FPSthreshold", "28");
+            g_dsText = DsfixSet(g_dsText, "enableBackups", "0");
+            g_dsText = DsfixSet(g_dsText, "backupInterval", "1500");
+            g_dsText = DsfixSet(g_dsText, "maxBackups", "10");
+            g_dsText = DsfixSet(g_dsText, "forceWindowed", "0");
+            g_dsText = DsfixSet(g_dsText, "enableVsync", "0");
+            g_dsText = DsfixSet(g_dsText, "fullscreenHz", "60");
+            g_dsText = DsfixSet(g_dsText, "dinput8dllWrapper", "none");
+            for (int i = 1; i < 10; ++i)
+                g_dsText = DsfixSet(g_dsText, ("dinputChain" + std::to_string(i)).c_str(), "none");
+            // Keep the change-detection snapshots in step with the reverted checkbox states so a
+            // basic-mode Save doesn't see a phantom toggle.
+            g_defDofInit = CtlChecked(U.defDof);
+            g_fpsStabInit = CtlChecked(U.fpsStab);
+            SetAaOptIn(false);               // defaults are AA off
+            LayoutDsfix(hWnd);               // collapse now-"none" chain dropdowns
+            return 0;
+        }
         if (id == IDC_DS_SAVE) {
             std::string t = g_dsText;
             // Preserve the user's existing dsfix.ini: only write a key when the chosen value
@@ -960,7 +1350,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
             put("captureCursor", "1", chk(U.capCur));
             put("disableCursor", "1", chk(U.disCur));
             put("skipIntro", "1", chk(U.skipIntro));
-            put("logLevel", "6", CtlChecked(U.logLvl) ? "3" : "6");
+            put("logLevel", "6", MappedValue(U.logLvl, LOG_VAL));
 
             put("enableHudMod", "0", g_hudEn);
             put("enableMinimalHud", "0", g_hudMin);
@@ -1054,6 +1444,569 @@ static void OpenDsfixConfig(HWND owner) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        if (!IsWindow(dlg)) break;
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+}
+
+// ============================================================ mctde Settings dialog
+// A themed, scrolling panel that round-trips mctde-link.ini. Curated settings show up
+// front; raw/diagnostic ones live behind an "Advanced Options" toggle. The Overlay group
+// gets bespoke widgets (font dropdown, padding sliders) and a live preview that mirrors
+// placement + font + scale + the show-toggles.
+static const int MC_CLIENTW = 500;
+
+// ---- narrow/wide helpers (ini keys/values are ASCII) ----
+static std::wstring WideOf(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+static std::string  NarrowOf(const std::wstring& s) { return std::string(s.begin(), s.end()); }
+static std::wstring MlPath() { return PathIn(L"mctde-link.ini"); }
+static std::wstring MlGetW(const wchar_t* sec, const wchar_t* key, const wchar_t* def) {
+    wchar_t buf[512] = {0};
+    GetPrivateProfileStringW(sec, key, def, buf, 512, MlPath().c_str());
+    return buf;
+}
+static int MlGetInt(const wchar_t* sec, const wchar_t* key, int def) {
+    return (int)GetPrivateProfileIntW(sec, key, def, MlPath().c_str());
+}
+static void MlSet(const wchar_t* sec, const wchar_t* key, const std::wstring& val) {
+    WritePrivateProfileStringW(sec, key, val.c_str(), MlPath().c_str());
+}
+static std::wstring CtlTextW(HWND h)  { wchar_t b[256] = {0}; GetWindowTextW(h, b, 256); return b; }
+static std::wstring CtlComboW(HWND h) {
+    int s = (int)SendMessageW(h, CB_GETCURSEL, 0, 0);
+    if (s < 0) return CtlTextW(h);
+    wchar_t b[128] = {0}; SendMessageW(h, CB_GETLBTEXT, s, (LPARAM)b); return b;
+}
+
+// ---- installed-font enumeration (sorted, de-duped, no @vertical faces) ----
+static int CALLBACK FontEnumCb(const LOGFONTW* lf, const TEXTMETRICW*, DWORD, LPARAM lp) {
+    auto* v = reinterpret_cast<std::vector<std::wstring>*>(lp);
+    if (lf->lfFaceName[0] == L'@') return 1;
+    std::wstring n = lf->lfFaceName;
+    for (auto& e : *v) if (_wcsicmp(e.c_str(), n.c_str()) == 0) return 1;
+    v->push_back(n);
+    return 1;
+}
+static std::vector<std::wstring> EnumInstalledFonts() {
+    std::vector<std::wstring> v;
+    HDC dc = GetDC(nullptr);
+    LOGFONTW lf = {0}; lf.lfCharSet = DEFAULT_CHARSET;
+    EnumFontFamiliesExW(dc, &lf, FontEnumCb, (LPARAM)&v, 0);
+    ReleaseDC(nullptr, dc);
+    std::sort(v.begin(), v.end(), [](const std::wstring& a, const std::wstring& b) {
+        return _wcsicmp(a.c_str(), b.c_str()) < 0; });
+    return v;
+}
+
+// ---- data-driven settings table (everything except the special Overlay widgets) ----
+// kind: 0 header, 1 checkbox, 2 int edit, 3 text edit, 4 combo
+struct McDef { int kind; const wchar_t* label; const wchar_t* sec; const wchar_t* key;
+               const wchar_t* def; bool adv; const wchar_t** items; int nItems; };
+static const wchar_t* IT_MODE[]    = { L"Ask", L"On", L"Off" };
+static const wchar_t* IT_BACKEND[] = { L"d3d", L"gdi" };
+static McDef g_def[] = {
+    {0,L"General",                       0,0,0,false,0,0},
+    {1,L"Hide soul counter (entire bottom-right)", L"HideSoulCounter",L"Enabled",L"0",false,0,0},
+    {1,L"Enable overlay logging",        L"Settings",L"EnableLogging",L"0",false,0,0},
+    {1,L"Quit game cleanly on window close", L"Settings",L"ExitWithGame",L"1",false,0,0},
+    {1,L"Require launcher to start the game", L"Launcher",L"RequireLauncher",L"1",false,0,0},
+    {0,L"Multiplayer overlay",            0,0,0,false,0,0},
+    {1,L"Show HP readout",               L"HP",L"Enabled",L"1",false,0,0},
+    {1,L"Show ping (TruePing)",          L"TruePing",L"Enabled",L"1",false,0,0},
+    {0,L"Overlay rendering",              0,0,0,false,0,0},
+    {4,L"Overlay backend",               L"Render",L"Backend",L"d3d",false,IT_BACKEND,2},
+    {2,L"Overlay refresh (ms)",          L"Render",L"SubmitMs",L"66",false,0,0},
+    // -------- advanced --------
+    {0,L"Overlay (advanced)",        0,0,0,true,0,0},
+    {2,L"Line height",                   L"Overlay",L"LineHeight",L"20",true,0,0},
+    {2,L"Overlay data poll (ms)",        L"Overlay",L"RefreshMs",L"1000",true,0,0},
+    {1,L"Hide your own row",             L"Overlay",L"HideLocal",L"0",true,0,0},
+    {1,L"Show local marker",             L"Overlay",L"ShowLocalMarker",L"1",true,0,0},
+    {1,L"Show disconnected rows",        L"Overlay",L"ShowDisconnected",L"1",true,0,0},
+    {3,L"Toggle modifier (VK hex)",      L"Overlay",L"ToggleModifier",L"0x10",true,0,0},
+    {3,L"Toggle key (VK hex)",           L"Overlay",L"ToggleKey",L"0x72",true,0,0},
+    {0,L"HP readout (advanced)",     0,0,0,true,0,0},
+    {2,L"Current-HP offset",             L"HP",L"CurrentOffset",L"724",true,0,0},
+    {2,L"Max-HP offset",                 L"HP",L"MaxOffset",L"728",true,0,0},
+    {2,L"1-HP linger (ms)",              L"HP",L"OneHpLingerMs",L"500",true,0,0},
+    {2,L"HP poll (ms)",                  L"HP",L"PollMs",L"33",true,0,0},
+    {0,L"Ping / TruePing (advanced)",0,0,0,true,0,0},
+    {2,L"Ping display mode",             L"TruePing",L"DisplayMode",L"2",true,0,0},
+    {1,L"Prefer overlay ping source",    L"TruePing",L"PreferOverlay",L"1",true,0,0},
+    {2,L"Ping channel",                  L"TruePing",L"Channel",L"63",true,0,0},
+    {2,L"Ping send interval (ms)",       L"TruePing",L"SendMs",L"1000",true,0,0},
+    {2,L"Ping stale timeout (ms)",       L"TruePing",L"StaleMs",L"4000",true,0,0},
+    {0,L"WebSocket feed (advanced)", 0,0,0,true,0,0},
+    {1,L"Enable WebSocket feed",         L"WebSocket",L"Enabled",L"0",true,0,0},
+    {2,L"WebSocket port",                L"WebSocket",L"Port",L"39876",true,0,0},
+    {2,L"WebSocket send (ms)",           L"WebSocket",L"SendMs",L"33",true,0,0},
+    {0,L"Debug (advanced)",          0,0,0,true,0,0},
+    {1,L"Dump overlay data to log",      L"Debug",L"DumpOverlayData",L"0",true,0,0},
+    {1,L"Debug P2P bridge",              L"Debug",L"DebugP2PBridge",L"0",true,0,0},
+    {0,L"Controller (advanced)",     0,0,0,true,0,0},
+    {1,L"First-launch binding nudge",    L"Controller",L"BindingNudge",L"1",true,0,0},
+    {1,L"Force binding nudge (testing)", L"Controller",L"BindingNudgeForce",L"0",true,0,0},
+    {3,L"Manual nudge key (VK hex)",     L"Controller",L"BindingNudgeKey",L"0",true,0,0},
+    {0,L"Compatibility (advanced)",  0,0,0,true,0,0},
+    {3,L"Chainload folder",              L"Compatibility",L"ChainloadFolder",L"mctde-Link_Chainload",true,0,0},
+};
+static const int MC_NDEF = (int)(sizeof(g_def) / sizeof(g_def[0]));
+
+struct McUi {
+    HWND view, adv, save, cancel;
+    HWND hdrOv, lblFont, font, lblSize, size, lblHpSize, hpSize, lblCorner, corner, lblPadX, padX, lblPadY, padY;
+    HWND showHeader, showHp, hpBars, showPing, showName, forceTop, preview;
+    HWND ctl[64], lbl[64];      // data-driven table (>= MC_NDEF)
+};
+static McUi M;
+static int  g_mcScroll = 0;
+static bool g_mcAdv = false;
+
+// live preview state, refreshed from the controls by McSync()
+struct McPv { std::wstring font; int size, hpSize, corner, padX, padY; bool hdr, hp, bars, ping, name; };
+static McPv g_pv = { L"Tahoma", 24, 48, 0, 5, 5, true, true, false, true, true };
+
+static bool McIsHeader(HWND h) {
+    for (int i = 0; i < MC_NDEF; ++i)
+        if (g_def[i].kind == 0 && M.ctl[i] == h) return true;
+    return false;
+}
+
+static void McSync() {
+    g_pv.font   = CtlComboW(M.font);
+    g_pv.size   = max(6, _wtoi(CtlTextW(M.size).c_str()));
+    g_pv.hpSize = max(6, (int)SendMessageW(M.hpSize, TBM_GETPOS, 0, 0));
+    g_pv.corner = max(0, (int)SendMessageW(M.corner, CB_GETCURSEL, 0, 0));
+    g_pv.padX   = (int)SendMessageW(M.padX, TBM_GETPOS, 0, 0);
+    g_pv.padY   = (int)SendMessageW(M.padY, TBM_GETPOS, 0, 0);
+    g_pv.hdr    = CtlChecked(M.showHeader);
+    g_pv.hp     = CtlChecked(M.showHp);
+    g_pv.bars   = CtlChecked(M.hpBars);
+    g_pv.ping   = CtlChecked(M.showPing);
+    g_pv.name   = CtlChecked(M.showName);
+    if (M.preview) InvalidateRect(M.preview, nullptr, TRUE);
+}
+
+// ---- the live overlay preview window ----
+static LRESULT CALLBACK McPreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_ERASEBKGND) return 1;
+    if (m == WM_PAINT) {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT rc; GetClientRect(h, &rc);
+        int W = rc.right, H = rc.bottom;
+        HBRUSH bg = CreateSolidBrush(ThField()); FillRect(dc, &rc, bg); DeleteObject(bg);
+        // a 16:9 "screen" centred inside the control
+        int sw = W - 4, sh = (int)(sw * 9.0 / 16.0);
+        if (sh > H - 4) { sh = H - 4; sw = (int)(sh * 16.0 / 9.0); }
+        int sx = (W - sw) / 2, sy = (H - sh) / 2;
+        RECT scr = { sx, sy, sx + sw, sy + sh };
+        HBRUSH sb = CreateSolidBrush(RGB(44, 48, 56)); FillRect(dc, &scr, sb); DeleteObject(sb);
+        HPEN pen = CreatePen(PS_SOLID, 1, ThBorder());
+        HGDIOBJ op = SelectObject(dc, pen), ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        Rectangle(dc, scr.left, scr.top, scr.right, scr.bottom);
+        SelectObject(dc, op); SelectObject(dc, ob); DeleteObject(pen);
+
+        double scale = (double)sw / 1920.0;
+        int fpx = max(6, (int)(g_pv.size * scale + 0.5));
+        int hpFpx = max(6, (int)(g_pv.hpSize * scale + 0.5));
+        HFONT f = CreateFontW(-fpx, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                              DEFAULT_PITCH, g_pv.font.c_str());
+        HFONT hf = CreateFontW(-hpFpx, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                              DEFAULT_PITCH, g_pv.font.c_str());
+        HFONT of = (HFONT)SelectObject(dc, f);
+        SetBkMode(dc, TRANSPARENT);
+        int lh = max((int)(fpx * 1.3), (int)(hpFpx * 1.3)) + 1;
+
+        struct Row { const wchar_t* ping; const wchar_t* name; };
+        static const Row rows[] = { { L"42ms", L"Solaire" }, { L"88ms", L"Lautrec" }, { L"120ms", L"Siegmeyer" } };
+        int nRows = (int)(sizeof(rows) / sizeof(rows[0]));
+        const wchar_t* hpSample = L"1650HP";
+        int hpW = 0, hpGap = 0;
+        if (g_pv.hp) {
+            if (g_pv.bars) hpW = (int)(hpFpx * 5.2);          // bars are 2x wide
+            else { SelectObject(dc, hf); SIZE z; GetTextExtentPoint32W(dc, hpSample, 6, &z); SelectObject(dc, f); hpW = z.cx; }
+            hpGap = max(3, fpx / 3);
+        }
+
+        // measure the widest row + header
+        int blockW = 0;
+        if (g_pv.hdr) { SIZE z; GetTextExtentPoint32W(dc, L"mctde", 5, &z); blockW = max(blockW, (int)z.cx); }
+        for (int i = 0; i < nRows; ++i) {
+            int rw = hpW + hpGap;
+            if (g_pv.ping) { SIZE z; GetTextExtentPoint32W(dc, rows[i].ping, (int)wcslen(rows[i].ping), &z); rw += z.cx + max(3, fpx / 3); }
+            if (g_pv.name) { SIZE z; GetTextExtentPoint32W(dc, rows[i].name, (int)wcslen(rows[i].name), &z); rw += z.cx; }
+            blockW = max(blockW, rw);
+        }
+        int blockH = lh * (nRows + (g_pv.hdr ? 1 : 0));
+        if (blockW < fpx) blockW = fpx;
+
+        int px = (int)(g_pv.padX * scale + 0.5), py = (int)(g_pv.padY * scale + 0.5);
+        bool right = (g_pv.corner == 1 || g_pv.corner == 3);
+        bool bottom = (g_pv.corner == 2 || g_pv.corner == 3);
+        int bx = right ? (scr.right - px - blockW) : (scr.left + px);
+        int by = bottom ? (scr.bottom - py - blockH) : (scr.top + py);
+        bx = max(scr.left + 2, min(bx, scr.right - blockW - 2));
+        by = max(scr.top + 2, min(by, scr.bottom - blockH - 2));
+
+        bool rightAlign = (g_pv.corner == 1 || g_pv.corner == 3);
+        int blockRight = bx + blockW;     // right edge of the content block
+        int ty = by;
+        if (g_pv.hdr) {
+            SetTextColor(dc, ThAccent());
+            SIZE hz; GetTextExtentPoint32W(dc, L"mctde", 5, &hz);
+            TextOutW(dc, rightAlign ? (blockRight - hz.cx) : bx, ty, L"mctde", 5);
+            ty += lh;
+        }
+        for (int i = 0; i < nRows; ++i) {
+            int nameW = 0, pingW = 0;
+            if (g_pv.name) { SIZE z; GetTextExtentPoint32W(dc, rows[i].name, (int)wcslen(rows[i].name), &z); nameW = z.cx; }
+            if (g_pv.ping) { SIZE z; GetTextExtentPoint32W(dc, rows[i].ping, (int)wcslen(rows[i].ping), &z); pingW = z.cx; }
+            int gap = max(3, fpx / 3);
+
+            auto drawHP = [&](int xx) {
+                if (g_pv.bars) {
+                    int barH = max(3, (int)(hpFpx * 0.7)); int barY = ty + (lh - barH) / 2;
+                    RECT br = { xx, barY, xx + hpW, barY + barH };
+                    HBRUSH hb = CreateSolidBrush(RGB(58, 16, 16)); FillRect(dc, &br, hb); DeleteObject(hb);
+                    int curW = (hpW * (3 - i)) / 3, ghostW = (hpW * 3) / 4;
+                    if (i == 1) { RECT yr = { xx + curW, barY, xx + ghostW, barY + barH }; HBRUSH yb = CreateSolidBrush(RGB(230, 205, 55)); FillRect(dc, &yr, yb); DeleteObject(yb); }
+                    RECT bf = { xx, barY, xx + curW, barY + barH }; HBRUSH gb = CreateSolidBrush(RGB(95, 175, 75)); FillRect(dc, &bf, gb); DeleteObject(gb);
+                } else {
+                    SelectObject(dc, hf); SetTextColor(dc, RGB(220, 220, 225));
+                    TextOutW(dc, xx, ty + (lh - hpFpx) / 2, hpSample, 6); SelectObject(dc, f);
+                }
+            };
+            auto drawPing = [&](int xx) { SetTextColor(dc, RGB(170, 200, 235)); TextOutW(dc, xx, ty, rows[i].ping, (int)wcslen(rows[i].ping)); };
+            auto drawName = [&](int xx) { SetTextColor(dc, RGB(232, 232, 236)); TextOutW(dc, xx, ty, rows[i].name, (int)wcslen(rows[i].name)); };
+
+            // right-justify the row against the block's right edge on right-side corners
+            int nEl = (g_pv.hp ? 1 : 0) + (g_pv.ping ? 1 : 0) + (g_pv.name ? 1 : 0);
+            int rowW = (g_pv.hp ? hpW : 0) + (g_pv.ping ? pingW : 0) + (g_pv.name ? nameW : 0) + (nEl > 1 ? gap * (nEl - 1) : 0);
+            int cx = rightAlign ? (blockRight - rowW) : bx;
+            if (!rightAlign) {
+                if (g_pv.hp)   { drawHP(cx);   cx += hpW + gap; }
+                if (g_pv.ping) { drawPing(cx); cx += pingW + gap; }
+                if (g_pv.name) { drawName(cx); }
+            } else {
+                if (g_pv.name) { drawName(cx); cx += nameW + gap; }
+                if (g_pv.ping) { drawPing(cx); cx += pingW + gap; }
+                if (g_pv.hp)   { drawHP(cx); }
+            }
+            ty += lh;
+        }
+        SelectObject(dc, of); DeleteObject(f); DeleteObject(hf);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+static HWND McSlider(HWND parent, int id, int minv, int maxv, int val) {
+    HWND h = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
+        WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS, 0, 0, 150, 26,
+        parent, (HMENU)(INT_PTR)id, g_inst, nullptr);
+    SendMessageW(h, TBM_SETRANGE, TRUE, MAKELONG(minv, maxv));
+    SendMessageW(h, TBM_SETPOS, TRUE, val);
+    return h;
+}
+
+// Owner-drawn font picker: each entry (and the selected field) is rendered in its own face,
+// so the dropdown is itself a preview of how the overlay text will look.
+static HWND McFontCombo(HWND parent, int id, int w, const std::vector<std::wstring>& items,
+                        const std::wstring& cur) {
+    HWND h = CreateWindowW(L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS,
+        0, 0, w, 320, parent, (HMENU)(INT_PTR)id, g_inst, nullptr);
+    SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+    int sel = 0;
+    for (size_t i = 0; i < items.size(); ++i) {
+        SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)items[i].c_str());
+        if (_wcsicmp(items[i].c_str(), cur.c_str()) == 0) sel = (int)i;
+    }
+    SendMessageW(h, CB_SETCURSEL, sel, 0);
+    return h;
+}
+// Draw one owner-drawn font-combo item in that font's own typeface.
+static void McDrawFontItem(LPDRAWITEMSTRUCT di) {
+    if ((int)di->itemID < 0) return;
+    wchar_t name[128] = {0};
+    SendMessageW(di->hwndItem, CB_GETLBTEXT, di->itemID, (LPARAM)name);
+    bool sel = (di->itemState & ODS_SELECTED) != 0;
+    HBRUSH b = CreateSolidBrush(sel ? ThAccent() : ThField());
+    FillRect(di->hDC, &di->rcItem, b); DeleteObject(b);
+    HFONT f = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                          OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, name);
+    HFONT of = (HFONT)SelectObject(di->hDC, f);
+    SetBkMode(di->hDC, TRANSPARENT);
+    SetTextColor(di->hDC, sel ? RGB(20, 20, 20) : ThText());
+    RECT tr = di->rcItem; tr.left += 5;
+    DrawTextW(di->hDC, name, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(di->hDC, of); DeleteObject(f);
+}
+
+// lay out every control at (content-Y - scroll); advance Y only for visible rows.
+// returns total content height.
+static int McLayout() {
+    RECT vr; GetClientRect(M.view, &vr);
+    const int CW = max(300, (int)vr.right);   // viewport client width (excludes the scrollbar)
+    const int LX = 14, FX = 116, ROW = 26, HDRH = 24, PVX = 264, PVH = 168;
+    const int PVW = max(150, CW - PVX - 10);
+    int y = 8;
+    int s = g_mcScroll;
+    auto P = [&](HWND h, int x, int yy, int w, int ht) { SetWindowPos(h, nullptr, x, yy - s, w, ht, SWP_NOZORDER); };
+
+    // ---- Overlay group (special widgets) + live preview on the right ----
+    SetWindowPos(M.hdrOv, nullptr, LX, y - s, 240, 18, SWP_NOZORDER); y += HDRH;
+    int ovTop = y;
+    P(M.lblFont,   LX, y + 3, 96, 18); P(M.font,   LX + 60, y, 188, 200); y += ROW;
+    P(M.lblSize,   LX, y + 3, 96, 18); P(M.size,   LX + 60, y, 56, 22);   y += ROW;
+    P(M.lblHpSize, LX, y + 3, 56, 18); P(M.hpSize, LX + 60, y, 188, 26);  y += ROW;
+    P(M.lblCorner, LX, y + 3, 96, 18); P(M.corner, LX + 60, y, 130, 200); y += ROW;
+    P(M.lblPadX,   LX, y + 3, 56, 18); P(M.padX,   LX + 60, y, 188, 26);  y += ROW;
+    P(M.lblPadY,   LX, y + 3, 56, 18); P(M.padY,   LX + 60, y, 188, 26);  y += ROW;
+    P(M.showHeader, LX, y, 240, 22); y += 23;
+    P(M.showHp,     LX, y, 240, 22); y += 23;
+    P(M.hpBars,     LX + 18, y, 240, 22); y += 23;   // sub-option of Show HP
+    P(M.showPing,   LX, y, 240, 22); y += 23;
+    P(M.showName,   LX, y, 240, 22); y += 23;
+    P(M.forceTop,   LX, y, 240, 22); y += 23;
+    // preview pinned at the top-right of the overlay group
+    SetWindowPos(M.preview, nullptr, PVX, ovTop - s, PVW, PVH, SWP_NOZORDER);
+    if (y < ovTop + PVH + 4) y = ovTop + PVH + 4;
+    y += 6;
+
+    // ---- data-driven table ----
+    for (int i = 0; i < MC_NDEF; ++i) {
+        McDef& d = g_def[i];
+        bool vis = !d.adv || g_mcAdv;
+        if (!vis) { ShowWindow(M.ctl[i], SW_HIDE); if (M.lbl[i]) ShowWindow(M.lbl[i], SW_HIDE); continue; }
+        ShowWindow(M.ctl[i], SW_SHOW); if (M.lbl[i]) ShowWindow(M.lbl[i], SW_SHOW);
+        if (d.kind == 0) {                       // section header
+            P(M.ctl[i], LX, y + 4, CW - 2 * LX, 18); y += HDRH + 2;
+        } else if (d.kind == 1) {                // checkbox
+            P(M.ctl[i], LX, y, CW - 2 * LX, 22); y += 24;
+        } else {                                 // labelled edit/combo
+            P(M.lbl[i], LX, y + 3, FX - LX, 18);
+            if (d.kind == 4) P(M.ctl[i], FX, y, 150, 200);
+            else             P(M.ctl[i], FX, y, 90, 22);
+            y += ROW;
+        }
+    }
+    return y + 6;
+}
+
+static void McRelayout() {
+    RECT vr; GetClientRect(M.view, &vr);
+    int viewH = vr.bottom;
+    int contentH = McLayout();
+    int maxS = max(0, contentH - viewH);
+    if (g_mcScroll > maxS) { g_mcScroll = maxS; McLayout(); }
+    SCROLLINFO si = { sizeof(si) }; si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    si.nMin = 0; si.nMax = contentH; si.nPage = viewH; si.nPos = g_mcScroll;
+    SetScrollInfo(M.view, SB_VERT, &si, TRUE);
+    RedrawWindow(M.view, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
+// Scroll by shifting the already-laid-out children with ScrollWindowEx -- it blits the
+// retained area and invalidates only the newly exposed strip, so there are no repaint trails.
+static void McScrollTo(int pos) {
+    SCROLLINFO si = { sizeof(si) }; si.fMask = SIF_RANGE | SIF_PAGE; GetScrollInfo(M.view, SB_VERT, &si);
+    int maxS = max(0, (int)si.nMax - (int)si.nPage);
+    pos = max(0, min(pos, maxS));
+    int dy = pos - g_mcScroll;
+    if (dy == 0) return;
+    g_mcScroll = pos;
+    SetScrollPos(M.view, SB_VERT, pos, TRUE);
+    ScrollWindowEx(M.view, 0, -dy, nullptr, nullptr, nullptr, nullptr,
+                   SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+    UpdateWindow(M.view);
+}
+static void McScrollBy(int dy) { McScrollTo(g_mcScroll + dy); }
+
+// ---- the scrolling viewport: hosts every setting control + the preview ----
+static LRESULT CALLBACK McViewProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LRESULT _tr = 0;
+    if (msg == WM_CTLCOLORSTATIC && McIsHeader((HWND)lParam)) {   // accent section headers
+        SetTextColor((HDC)wParam, ThAccent());
+        SetBkColor((HDC)wParam, ThBg());
+        SetBkMode((HDC)wParam, OPAQUE);
+        return (LRESULT)(g_dark ? g_brBg : GetSysColorBrush(COLOR_BTNFACE));
+    }
+    if (msg == WM_MEASUREITEM) {                                   // taller rows for the font list
+        LPMEASUREITEMSTRUCT mi = (LPMEASUREITEMSTRUCT)lParam;
+        if (mi->CtlID == IDC_MC_FONT) { mi->itemHeight = 20; return TRUE; }
+    }
+    if (msg == WM_DRAWITEM) {                                      // font items, each in its own face
+        LPDRAWITEMSTRUCT di = (LPDRAWITEMSTRUCT)lParam;
+        if (di->CtlType == ODT_COMBOBOX && di->CtlID == IDC_MC_FONT) { McDrawFontItem(di); return TRUE; }
+    }
+    if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
+    switch (msg) {
+    case WM_COMMAND:   McSync(); return 0;                         // any change -> refresh preview
+    case WM_HSCROLL:   McSync(); return 0;                         // padding sliders
+    case WM_MOUSEWHEEL: McScrollBy(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -48 : 48); return 0;
+    case WM_VSCROLL: {
+        SCROLLINFO si = { sizeof(si) }; si.fMask = SIF_ALL; GetScrollInfo(hWnd, SB_VERT, &si);
+        int pos = si.nPos, page = si.nPage;
+        switch (LOWORD(wParam)) {
+        case SB_LINEUP: pos -= 24; break; case SB_LINEDOWN: pos += 24; break;
+        case SB_PAGEUP: pos -= page; break; case SB_PAGEDOWN: pos += page; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+        }
+        McScrollTo(pos);
+        return 0;
+    }
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static void McSave() {
+    for (int i = 0; i < MC_NDEF; ++i) {
+        McDef& d = g_def[i];
+        if (d.kind == 0) continue;
+        std::wstring val;
+        if (d.kind == 1)      val = CtlChecked(M.ctl[i]) ? L"1" : L"0";
+        else if (d.kind == 4) val = CtlComboW(M.ctl[i]);
+        else                  val = CtlTextW(M.ctl[i]);
+        MlSet(d.sec, d.key, val);
+        // Hide-soul-counter checkbox drives its companion keys (the actual hide is HideBox=1).
+        if (!wcscmp(d.sec, L"HideSoulCounter") && !wcscmp(d.key, L"Enabled")) {
+            bool on = (val == L"1");
+            MlSet(L"HideSoulCounter", L"VerifyOnly",    on ? L"0" : L"1");
+            MlSet(L"HideSoulCounter", L"HideGainPopup", L"1");
+            MlSet(L"HideSoulCounter", L"HideBox",       on ? L"1" : L"0");
+        }
+    }
+    // overlay specials
+    MlSet(L"Overlay", L"FontFace",  CtlComboW(M.font));
+    MlSet(L"Overlay", L"FontHeight",CtlTextW(M.size));
+    MlSet(L"Overlay", L"HpFontHeight", std::to_wstring((int)SendMessageW(M.hpSize, TBM_GETPOS, 0, 0)));
+    MlSet(L"Overlay", L"Corner",    CtlComboW(M.corner));
+    MlSet(L"Overlay", L"PaddingX",  std::to_wstring((int)SendMessageW(M.padX, TBM_GETPOS, 0, 0)));
+    MlSet(L"Overlay", L"PaddingY",  std::to_wstring((int)SendMessageW(M.padY, TBM_GETPOS, 0, 0)));
+    MlSet(L"Overlay", L"ShowHeader",CtlChecked(M.showHeader) ? L"1" : L"0");
+    MlSet(L"Overlay", L"ShowHp",    CtlChecked(M.showHp)     ? L"1" : L"0");
+    MlSet(L"Overlay", L"HpBars",    CtlChecked(M.hpBars)     ? L"1" : L"0");
+    MlSet(L"Overlay", L"ShowPing",  CtlChecked(M.showPing)   ? L"1" : L"0");
+    MlSet(L"Overlay", L"ShowName",  CtlChecked(M.showName)   ? L"1" : L"0");
+    MlSet(L"Overlay", L"ForceTopmost", CtlChecked(M.forceTop) ? L"1" : L"0");
+}
+
+static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LRESULT _tr = 0;
+    if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
+    switch (msg) {
+    case WM_CREATE: {
+        g_mcScroll = 0; g_mcAdv = false;
+        RECT cr; GetClientRect(hWnd, &cr);
+        int bottom = cr.bottom, right = cr.right;
+        M.adv = DsMakeCheck(hWnd, IDC_MC_ADV, L"Advanced Options", false);
+        SetWindowPos(M.adv, nullptr, 14, 9, 200, 22, SWP_NOZORDER);
+        M.save   = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
+                                 right - 164, bottom - 38, 70, 28, hWnd, (HMENU)IDC_MC_SAVE, g_inst, nullptr);
+        M.cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+                                 right - 86, bottom - 38, 70, 28, hWnd, (HMENU)IDC_MC_CANCEL, g_inst, nullptr);
+        SendMessageW(M.save, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        SendMessageW(M.cancel, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+
+        // scrolling viewport between the top toggle and the bottom button bar
+        M.view = CreateWindowExW(0, L"mctdeSetView", L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
+            0, 38, right, bottom - 38 - 46, hWnd, nullptr, g_inst, nullptr);
+
+        // --- special Overlay widgets (children of the viewport) ---
+        M.hdrOv     = DsMakeLabel(M.view, L"Overlay", 0, 0, 240);
+        M.lblFont   = DsMakeLabel(M.view, L"Font", 0, 0, 96);
+        std::vector<std::wstring> fonts = EnumInstalledFonts();
+        M.font      = McFontCombo(M.view, IDC_MC_FONT, 188, fonts, MlGetW(L"Overlay", L"FontFace", L"Tahoma"));
+        M.lblSize   = DsMakeLabel(M.view, L"Font size", 0, 0, 96);
+        M.size      = DsMakeEdit(M.view, IDC_MC_SIZE, NarrowOf(MlGetW(L"Overlay", L"FontHeight", L"24")), 0, 0, 56);
+        M.lblHpSize = DsMakeLabel(M.view, L"HP size", 0, 0, 96);
+        M.hpSize    = McSlider(M.view, IDC_MC_HPSIZE, 12, 80, MlGetInt(L"Overlay", L"HpFontHeight", 48));
+        M.lblCorner = DsMakeLabel(M.view, L"Screen corner", 0, 0, 96);
+        M.corner    = DsMakeCombo(M.view, IDC_MC_CORNER, 0, 0, 130,
+                                  { L"top_left", L"top_right", L"bottom_left", L"bottom_right" },
+                                  NarrowOf(MlGetW(L"Overlay", L"Corner", L"top_left")));
+        M.lblPadX   = DsMakeLabel(M.view, L"Padding X", 0, 0, 56);
+        M.padX      = McSlider(M.view, IDC_MC_PADX, 0, 400, MlGetInt(L"Overlay", L"PaddingX", 5));
+        M.lblPadY   = DsMakeLabel(M.view, L"Padding Y", 0, 0, 56);
+        M.padY      = McSlider(M.view, IDC_MC_PADY, 0, 400, MlGetInt(L"Overlay", L"PaddingY", 5));
+        M.showHeader= DsMakeCheck(M.view, IDC_MC_SHOWHDR,  L"Show \"mctde\" header", MlGetInt(L"Overlay", L"ShowHeader", 1) != 0);
+        M.showHp    = DsMakeCheck(M.view, IDC_MC_SHOWHP,   L"Show HP", MlGetInt(L"Overlay", L"ShowHp", 1) != 0);
+        M.hpBars    = DsMakeCheck(M.view, IDC_MC_HPBARS,   L"Render HP as a bar (not a number)", MlGetInt(L"Overlay", L"HpBars", 0) != 0);
+        M.showPing  = DsMakeCheck(M.view, IDC_MC_SHOWPING, L"Show ping", MlGetInt(L"Overlay", L"ShowPing", 1) != 0);
+        M.showName  = DsMakeCheck(M.view, IDC_MC_SHOWNAME, L"Show names", MlGetInt(L"Overlay", L"ShowName", 1) != 0);
+        M.forceTop  = DsMakeCheck(M.view, IDC_MC_FORCETOP, L"Force overlay always-on-top", MlGetInt(L"Overlay", L"ForceTopmost", 0) != 0);
+        M.preview   = CreateWindowExW(0, L"mctdePreview", L"", WS_CHILD | WS_VISIBLE,
+                                      0, 0, 200, 168, M.view, (HMENU)IDC_MC_PREVIEW, g_inst, nullptr);
+
+        // --- data-driven table controls ---
+        for (int i = 0; i < MC_NDEF; ++i) {
+            McDef& d = g_def[i]; int id = IDC_MC_DYN + i;
+            M.lbl[i] = nullptr; M.ctl[i] = nullptr;
+            if (d.kind == 0) {
+                M.ctl[i] = DsMakeLabel(M.view, d.label, 0, 0, MC_CLIENTW - 28);
+            } else if (d.kind == 1) {
+                M.ctl[i] = DsMakeCheck(M.view, id, d.label, MlGetInt(d.sec, d.key, _wtoi(d.def)) != 0);
+            } else if (d.kind == 4) {
+                M.lbl[i] = DsMakeLabel(M.view, d.label, 0, 0, 150);
+                std::vector<std::wstring> it; for (int k = 0; k < d.nItems; ++k) it.push_back(d.items[k]);
+                M.ctl[i] = DsMakeCombo(M.view, id, 0, 0, 150, it, NarrowOf(MlGetW(d.sec, d.key, d.def)));
+            } else {
+                M.lbl[i] = DsMakeLabel(M.view, d.label, 0, 0, 150);
+                M.ctl[i] = DsMakeEdit(M.view, id, NarrowOf(MlGetW(d.sec, d.key, d.def)), 0, 0, 90);
+            }
+        }
+        McSync();
+        McRelayout();
+        return 0;
+    }
+    case WM_MOUSEWHEEL: McScrollBy(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -48 : 48); return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_MC_ADV:    g_mcAdv = CtlChecked(M.adv); g_mcScroll = 0; McRelayout(); return 0;
+        case IDC_MC_SAVE:   McSave(); DestroyWindow(hWnd); return 0;
+        case IDC_MC_CANCEL: DestroyWindow(hWnd); return 0;
+        }
+        return 0;
+    case WM_CLOSE: DestroyWindow(hWnd); return 0;
+    case WM_DESTROY:
+        if (HWND owner = GetWindow(hWnd, GW_OWNER)) { EnableWindow(owner, TRUE); SetActiveWindow(owner); }
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+static void OpenMctdeSettings(HWND owner) {
+    if (!FileExists(MlPath())) {
+        MessageBoxW(owner, L"mctde-link.ini was not found next to the launcher.",
+                    L"mctde Settings", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc = {0};
+        wc.hInstance = g_inst; wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpfnWndProc = McDialogProc;  wc.lpszClassName = L"mctdeSettings";    RegisterClassW(&wc);
+        wc.lpfnWndProc = McViewProc;    wc.lpszClassName = L"mctdeSetView";     RegisterClassW(&wc);
+        wc.lpfnWndProc = McPreviewProc; wc.lpszClassName = L"mctdePreview";     RegisterClassW(&wc);
+        registered = true;
+    }
+    RECT rc; GetWindowRect(owner, &rc);
+    RECT wa = {0}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int H = min(660, wa.bottom - wa.top - 40);
+    int x = rc.left + 30, yTop = rc.top + 10;
+    if (yTop + H > wa.bottom) yTop = max((LONG)wa.top, wa.bottom - H);
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"mctdeSettings", L"mctde Settings",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, x, yTop, MC_CLIENTW, H, owner, nullptr, g_inst, nullptr);
+    EnableWindow(owner, FALSE);
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        if (!IsDialogMessageW(dlg, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
         if (!IsWindow(dlg)) break;
     }
     EnableWindow(owner, TRUE);
@@ -1519,6 +2472,12 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
     switch (msg) {
     case WM_CREATE: {
         g_hMain = hWnd;
+        // "mctde Settings" button -- opens the mctde-link.ini panel (overlay placement/font/preview,
+        // Hide Soul Counter, and the rest of mctde-Link's config). Sits in the bottom button row,
+        // between Changelog (x 16..116) and Exit (x 300..380).
+        HWND btnMctde = CreateWindowW(L"BUTTON", L"mctde Settings",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 130, 300, 150, 30,
+            hWnd, (HMENU)IDC_BTN_MCTDE, g_inst, nullptr);
         // Widths are sized to the text so the controls' opaque background doesn't paint over
         // the Artorias silhouette on the right.
         g_chkPhantom = CreateWindowW(L"BUTTON", L"PhantomUnleashed (uncommon)",
@@ -1565,7 +2524,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW, 404, 296, 100, 40,
             hWnd, (HMENU)IDC_BTN_PLAY, g_inst, nullptr);
 
-        for (HWND h : { g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice, g_chkDscm,
+        for (HWND h : { btnMctde, g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice, g_chkDscm,
                         g_chkAutoUpdate, g_chkDark, g_lblVersion, g_lblClock, chlog, exit, play })
             SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
 
@@ -1654,6 +2613,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             RepaintOverBg((HWND)lParam);
         switch (LOWORD(wParam)) {
         case IDC_BTN_CONFIG:    OpenDsfixConfig(hWnd); return 0;
+        case IDC_BTN_MCTDE:     OpenMctdeSettings(hWnd); return 0;
         case IDC_BTN_CHANGELOG: OpenChangelog(hWnd);   return 0;
         case IDC_BTN_PLAY:      ApplyAnd(hWnd, true);  return 0;
         case IDC_BTN_EXIT:      ApplyAnd(hWnd, false); return 0;
@@ -1685,6 +2645,13 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_inst = hInst;
     g_dir = ModuleDir();
+
+    // Regenerate a full, documented mctde-link.ini if it's missing, BEFORE anything reads or
+    // writes a key (a key-at-a-time write would otherwise leave a bare-bones file).
+    EnsureIniSeeded();
+
+    // Trackbar (slider) class for the mctde Settings overlay-padding sliders.
+    { INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES }; InitCommonControlsEx(&icc); }
 
     // Clean up the previous exe left behind by a self-update.
     {

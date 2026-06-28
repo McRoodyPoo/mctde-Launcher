@@ -1,5 +1,20 @@
 # mctde-Launcher Changelog
 
+## v0.5.0: MissionControl
+
+- New "mctde Settings" button and dialog that round-trips mctde-link.ini, with curated options up front and the rest behind Advanced Options.
+- Live overlay preview in mctde Settings that mirrors corner, font, size, padding, and the show/hide toggles as you change them.
+- Owner-drawn font picker that renders each installed font in its own typeface, plus sliders for HP size and overlay padding.
+- Hide Soul Counter toggle that hides the entire bottom-right soul display: box, icon, number, and the "+N" popup.
+- "Revert to Defaults" button in the DSFix config that fills every field with the recommended defaults (nothing saved until you click Save).
+- DSFix Log Level is now a full 0-11 dropdown instead of a single on/off checkbox.
+- FPS Stabilizer (basic) and Unlock FPS (advanced) now stay in lockstep so neither silently overrides the other.
+- HUD Mod moved into Advanced Options, since its full-HUD recomposite is a niche, glitch-prone tweak.
+- Repositioned the banner art in both themes: the title and Artorias shrink and anchor to the top-right, opening the lower-left for the controls.
+- Force steam_appid.txt to 480 (Spacewar) before launch so every install shares the same mctde matchmaking pool.
+- PhantomUnleashed now also writes VerifyOnly=0 so the phantom-cap patch actually applies instead of only logging.
+- Regenerate a complete, fully documented mctde-link.ini when it's missing, instead of a bare-bones file.
+
 ## v0.4.1: AliasArmistice
 
 - DSFix antialiasing is now forced off before every launch. SMAA (and SSAO) collide with the in-frame overlay and smear the 3D world with red/yellow corruption that only a resolution change clears; keeping AA off sidesteps the collision entirely.
