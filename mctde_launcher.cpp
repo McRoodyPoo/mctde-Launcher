@@ -2322,6 +2322,14 @@ static void SetVersionLabel(HWND hWnd) {
 // mctde-Link and/or the launcher when out of date.
 static DWORD WINAPI UpdateThread(LPVOID param) {
     HWND main = (HWND)param;
+
+    // Self-heal: if mctde-Link's d3d9.dll is missing entirely (deleted, or never installed),
+    // pull the latest release so the mod can load. Done first, before anything else: it's
+    // unconditional (a missing core dll breaks the overlay/phantom features completely, so this
+    // ignores the Auto-Update toggle) and independent of latest.txt (it hits releases/latest).
+    if (!FileExists(PathIn(L"d3d9.dll")) && UpdateLink() && IsWindow(main))
+        PostMessageW(main, WM_VERSIONS_READY, 0, 0);
+
     std::string manifest;
     if (!HttpsGet(L"raw.githubusercontent.com", L"/McRoodyPoo/mctde-Link/main/latest.txt", manifest))
         return 0;
