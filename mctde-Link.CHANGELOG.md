@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.4.8 - SoFresh
+
+- HP bars now blit the game's real HP-gauge texture, baked from your own menu files.
+- Host rows show a human/hollow icon; your own row shows its own marker icon.
+- Right-anchored corners put the role icon right of the name and right-align the name.
+- Overlay can auto-hide while an in-game menu is open (`[Overlay] HideInMenu=1`).
+- 1HP race flashes the whole bar solid red/green for a latched 1.5s, never any text.
+- Ping and name text always keep their normal colour (no stray red letters).
+- Install/update defaults: Classic Font, Health Bar (damage), bottom-right, Y-pad 97, logging off.
+
+## v0.4.7 - PhantomPool
+
+- PhantomUnleashed now applies when enabled even if your ini was missing `VerifyOnly`, instead of silently doing nothing.
+- Missing PhantomUnleashed keys and legacy `[MorePhantoms]` settings now migrate forward automatically, no hand-editing.
+- New `HideSoulCounter`: hide the bottom-right soul counter number, the `+N` popup, the whole box, or a screen region.
+- New overlay HP bars: show each player's HP as a Souls-style gauge instead of a number (`[Overlay] HpBars=1`).
+
 ## v0.4.6 - Spacewar Setup
 
 - Added an on-screen "Spacewar Controller Setup" panel: step-by-step instructions for mapping a controller through Steam's Gamepad template.

@@ -1,5 +1,11 @@
 # mctde-Launcher Changelog
 
+## v0.5.1: SoFresh
+
+- New install/update defaults: Classic Font, Health Bar (damage), bottom-right, Y-pad 97, logging off.
+- "FPS Stabilizer" checkbox relabelled to warn it causes microstutters.
+- Overlay icons and HP-gauge now bake from the packed menu TPFs, not just unpacked DDS.
+
 ## v0.5.0: MissionControl
 
 - New "mctde Settings" button and dialog that round-trips mctde-link.ini, with curated options up front and the rest behind Advanced Options.

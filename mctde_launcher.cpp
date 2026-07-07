@@ -25,6 +25,9 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <unordered_set>
 #include <commctrl.h>
 #include "resource.h"
 
@@ -40,7 +43,7 @@
 
 // This launcher's own version. Bump on each launcher release and keep latest.txt's
 // mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.5.0";
+static const char* LAUNCHER_VERSION = "0.5.1";
 
 // ------------------------------------------------------------ control IDs
 #define IDC_CHK_PHANTOM  1001
@@ -136,6 +139,8 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 #define IDC_MC_PREVIEW    2213
 #define IDC_MC_HPBARS     2214
 #define IDC_MC_HPSIZE     2215
+#define IDC_MC_HPDISP     2216
+#define IDC_MC_CLASSICFONT 2217
 #define IDC_MC_DYN        2300   // base for the data-driven settings table (2300..)
 
 static HINSTANCE g_inst = nullptr;
@@ -556,9 +561,10 @@ FontFace=Tahoma
 FontHeight=24
 HpFontHeight=24
 LineHeight=20
-Corner=top_left
+Corner=bottom_right
 PaddingX=5
-PaddingY=5
+PaddingY=97
+UseDsFont=1
 RefreshMs=1000
 HideLocal=0
 ForceTopmost=0
@@ -577,7 +583,14 @@ ShowHp=1
 ; HpBars: draw each player's HP as a Souls-style filled gauge (green->amber->red as it drops)
 ;   instead of a number. 0 = numbers (default), 1 = bars. Needs a readable max HP for that row
 ;   (falls back to the number when max HP isn't known, e.g. some remote players).
-HpBars=0
+HpBars=1
+; HpBarStyle: sub-style used when HpBars=1 (ignored when HpBars=0):
+;   0 = minimal  : plain bar.
+;   1 = damage   : the amount just lost is printed inside the bar in yellow (moves to the right half
+;                  once current HP < half). Numbers linger for DamageLingerMs, same as the chip.
+;   2 = detailed : like damage (yellow amount-lost inside the bar), plus the current HP printed in
+;                  white beside the name (left of the name, or right when the overlay is left-aligned).
+HpBarStyle=1
 ShowPing=1
 ShowName=1
 ShowLocalMarker=1
@@ -599,8 +612,9 @@ CurrentOffset=724
 MaxOffset=728
 OneHpLingerMs=500
 ; DamageLingerMs: with [Overlay] HpBars=1, how long (ms) the yellow "just lost" chip lingers
-;   on an HP bar after a hit before it recedes to the new (green) HP level. Default 1000 (1s).
-DamageLingerMs=1000
+;   on an HP bar after a hit before it recedes to the new (green) HP level. This also governs how
+;   long the damage/detailed HpBarStyle numbers stay on screen. Default 1500 (1.5s).
+DamageLingerMs=1500
 PollMs=33
 
 [Debug]
@@ -628,6 +642,11 @@ SendType=2
 SendMs=1000
 HelloMs=500
 StaleMs=4000
+
+[Migration]
+; Stamps which one-time default migrations have already run, so the overlay never re-forces a
+; recommended default over a value you later changed yourself. Fresh installs start already-stamped.
+SoFreshDefaults=1
 )INI";
 
 // If mctde-link.ini is missing (e.g. the user deleted it), write the full documented default so
@@ -699,6 +718,471 @@ static void EnsureSteamAppId() {
         WriteFileUtf8(p, "480");
 }
 
+// ============================================================ DSFont bitmap cache (Steam-name coverage)
+// Bakes the game's OWN DSFont24 UI font (DATA\font\<lang>\DSFont24.tpf + .ccm) into a merged glyph
+// blob that mctde_overlay.dll loads into its ImGui atlas. English is the base UI font; Japanese/
+// Korean/TChinese glyphs are merged in (deduped, English wins ties) so arbitrary Steam names render
+// instead of turning into boxes. Generated from the user's own files on first launch -- nothing
+// copyrighted ships. Output: <ChainloadDir>\mctde_dsfont.bin (cached; regenerated only when the
+// source font files change). All binary parsing here (TPF DDS scan, BC3 alpha decode, CCM v1) was
+// validated byte-exact against texconv/SoulsFormats before porting.
+namespace dsfont {
+
+static const uint32_t BLOB_VERSION = 1;
+
+static uint32_t rdU32(const uint8_t* p){ return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
+static int16_t  rdS16(const uint8_t* p){ return (int16_t)((uint16_t)p[0]|((uint16_t)p[1]<<8)); }
+static float    rdF32(const uint8_t* p){ uint32_t u=rdU32(p); float f; memcpy(&f,&u,4); return f; }
+
+static std::vector<uint8_t> ReadAll(const std::wstring& path){
+    std::vector<uint8_t> v;
+    HANDLE h=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(h==INVALID_HANDLE_VALUE) return v;
+    LARGE_INTEGER sz;
+    if(GetFileSizeEx(h,&sz) && sz.QuadPart>0 && sz.QuadPart < (LONGLONG)200*1024*1024){
+        v.resize((size_t)sz.QuadPart); size_t done=0; DWORD rd=0;
+        while(done<v.size()){ if(!ReadFile(h,v.data()+done,(DWORD)(v.size()-done),&rd,nullptr)||rd==0){v.clear();break;} done+=rd; }
+    }
+    CloseHandle(h); return v;
+}
+
+struct Glyph { uint32_t code; int x,y,w,h,pre,adv,tex; };
+
+// Decode a WxH DXT5 page's ALPHA channel (RGB is white) into out[W*H], row-major. Verified
+// byte-exact vs texconv across all 262144 px of page 0.
+static void DecodeBC3Alpha(const uint8_t* dds, int W, int H, std::vector<uint8_t>& out){
+    out.assign((size_t)W*H,0);
+    const uint8_t* blk=dds+0x80; int bpr=W/4;   // 128-byte DDS header
+    for(int by=0;by<H/4;++by) for(int bx=0;bx<bpr;++bx){
+        const uint8_t* b=blk+((size_t)(by*bpr+bx)*16);
+        int a0=b[0],a1=b[1],pal[8]; pal[0]=a0; pal[1]=a1;
+        if(a0>a1){ for(int i=1;i<=6;++i) pal[i+1]=((7-i)*a0+i*a1+3)/7; }
+        else{ for(int i=1;i<=4;++i) pal[i+1]=((5-i)*a0+i*a1+2)/5; pal[6]=0; pal[7]=255; }
+        uint32_t lo=(uint32_t)b[2]|((uint32_t)b[3]<<8)|((uint32_t)b[4]<<16);
+        uint32_t hi=(uint32_t)b[5]|((uint32_t)b[6]<<8)|((uint32_t)b[7]<<16);
+        for(int t=0;t<16;++t){ int idx = t<8 ? (int)((lo>>(3*t))&7) : (int)((hi>>(3*(t-8)))&7);
+            int px=bx*4+(t&3), py=by*4+(t>>2); out[(size_t)py*W+px]=(uint8_t)pal[idx]; }
+    }
+}
+
+// A DS1 .tpf embeds one full DDS per page; scan for the "DDS " magic and decode each (page order
+// == CCM TexIndex order).
+static bool LoadTpfPages(const std::wstring& path, std::vector<std::vector<uint8_t>>& pages, int& W, int& H){
+    std::vector<uint8_t> d=ReadAll(path); if(d.size()<0x80) return false; W=H=0;
+    for(size_t i=0;i+0x80<=d.size();){
+        if(!(d[i]=='D'&&d[i+1]=='D'&&d[i+2]=='S'&&d[i+3]==' ')){ ++i; continue; }
+        if(i+0x58>d.size()) break;
+        int h=(int)rdU32(&d[i+0x0C]), w=(int)rdU32(&d[i+0x10]);
+        if(w<=0||h<=0||w>4096||h>4096||(w&3)||(h&3)){ ++i; continue; }
+        if(!(d[i+0x54]=='D'&&d[i+0x55]=='X'&&d[i+0x56]=='T'&&d[i+0x57]=='5')){ ++i; continue; }
+        size_t topBytes=(size_t)(w/4)*(h/4)*16;
+        if(i+0x80+topBytes>d.size()){ ++i; continue; }
+        if(W==0){ W=w; H=h; }
+        std::vector<uint8_t> a; DecodeBC3Alpha(&d[i],w,h,a); pages.push_back(std::move(a));
+        i += 0x80+topBytes;   // skip this page (incl. its mip chain remainder is re-scanned harmlessly)
+    }
+    return !pages.empty();
+}
+
+// SoulsFormats CCM v1 (DS1): normalized-UV glyph rects resolved through code groups.
+static bool LoadCcm(const std::wstring& path, std::vector<Glyph>& out){
+    std::vector<uint8_t> d=ReadAll(path); if(d.size()<0x20) return false;
+    uint32_t fsize=rdU32(&d[4]);
+    int texW=rdS16(&d[0x0A]), texH=rdS16(&d[0x0C]);
+    int cg=rdS16(&d[0x10]); uint32_t goff=rdU32(&d[0x18]);
+    if(goff<0x20 || goff>d.size() || texW<=0 || texH<=0) return false;
+    int gcount=(int)((fsize-goff)/24);
+    if(gcount<=0 || goff+(size_t)gcount*24>d.size()) return false;
+    std::vector<Glyph> gl((size_t)gcount);
+    for(int i=0;i<gcount;++i){ const uint8_t* p=&d[goff+(size_t)24*i];
+        float u1x=rdF32(p),u1y=rdF32(p+4),u2x=rdF32(p+8),u2y=rdF32(p+12);
+        Glyph g; g.code=0;
+        g.x=(int)(u1x*texW+0.5f); g.y=(int)(u1y*texH+0.5f);
+        g.w=(int)((u2x-u1x)*texW+0.5f); g.h=(int)((u2y-u1y)*texH+0.5f);
+        g.pre=rdS16(p+16); g.adv=rdS16(p+20); g.tex=rdS16(p+22);
+        gl[(size_t)i]=g;
+    }
+    for(int i=0;i<cg;++i){ const uint8_t* p=&d[0x20+(size_t)12*i];
+        int s=(int)rdU32(p), e=(int)rdU32(p+4), gi=(int)rdU32(p+8);
+        if(e<s || e-s>0x20000) continue;
+        for(int c=s;c<=e;++c){ int idx=gi+(c-s); if(idx>=0&&idx<gcount){ Glyph g=gl[(size_t)idx]; g.code=(uint32_t)c; out.push_back(g);} }
+    }
+    return true;
+}
+
+// FNV-1a over (size, mtime) of each present source file -> staleness key.
+static uint32_t SourceSignature(const std::wstring& fontDir, const wchar_t* const* langs, int nlang){
+    uint32_t hsh=2166136261u;
+    auto mix=[&](const void* pp,size_t n){ const uint8_t* p=(const uint8_t*)pp; for(size_t i=0;i<n;++i){ hsh^=p[i]; hsh*=16777619u; } };
+    for(int i=0;i<nlang;++i) for(int k=0;k<2;++k){
+        std::wstring f=fontDir+langs[i]+(k?L"\\DSFont24.ccm":L"\\DSFont24.tpf");
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if(GetFileAttributesExW(f.c_str(),GetFileExInfoStandard,&fa)){
+            mix(&fa.nFileSizeLow,4); mix(&fa.nFileSizeHigh,4); mix(&fa.ftLastWriteTime,sizeof(FILETIME));
+        }
+    }
+    hsh ^= BLOB_VERSION*2654435761u;
+    return hsh;
+}
+
+// Extract + merge all glyphs, write the blob. Returns true on success.
+static bool Generate(const std::wstring& fontDir, const std::wstring& blobPath){
+    const wchar_t* langs[]={L"english",L"japanese",L"korean",L"tchinese"};
+    const int NL=4;
+
+    struct Out { uint32_t code; int w,h,xoff,adv; std::vector<uint8_t> bmp; };
+    std::vector<Out> out; out.reserve(12000);
+    std::unordered_set<uint32_t> seen; seen.reserve(24000);
+    int maxH=0; bool anyEnglish=false;
+
+    for(int li=0; li<NL; ++li){
+        std::wstring lb=fontDir+langs[li];
+        std::vector<Glyph> glyphs;
+        if(!LoadCcm(lb+L"\\DSFont24.ccm", glyphs)) continue;
+        std::vector<std::vector<uint8_t>> pages; int W=0,H=0;
+        if(!LoadTpfPages(lb+L"\\DSFont24.tpf", pages, W, H)) continue;
+        if(li==0) anyEnglish=true;
+        for(const Glyph& g : glyphs){
+            if(g.code==0 || seen.count(g.code)) continue;
+            if(g.tex<0 || g.tex>=(int)pages.size()) continue;
+            if(g.w<=0||g.h<=0||g.x<0||g.y<0||g.x+g.w>W||g.y+g.h>H) continue;
+            Out o; o.code=g.code; o.w=g.w; o.h=g.h; o.xoff=g.pre; o.adv=(g.adv>0?g.adv:g.pre+g.w);
+            o.bmp.resize((size_t)g.w*g.h);
+            const std::vector<uint8_t>& pg=pages[(size_t)g.tex];
+            for(int r=0;r<g.h;++r) memcpy(&o.bmp[(size_t)r*g.w], &pg[(size_t)(g.y+r)*W+g.x], (size_t)g.w);
+            if(g.h>maxH) maxH=g.h;
+            seen.insert(g.code); out.push_back(std::move(o));
+        }
+    }
+    if(!anyEnglish || out.empty()) return false;
+
+    int lineHeight=maxH+3, baseY=(maxH>=5?maxH-5:maxH);
+
+    std::vector<uint8_t> blob; blob.reserve(9u*1024*1024);
+    auto pushN =[&](const void* p,size_t n){ const uint8_t* b=(const uint8_t*)p; blob.insert(blob.end(),b,b+n); };
+    auto pushU32=[&](uint32_t v){ pushN(&v,4); };
+    auto pushU16=[&](uint16_t v){ pushN(&v,2); };
+    auto pushS16=[&](int16_t v){ pushN(&v,2); };
+    pushN("MCTDEFNT",8);
+    pushU32(BLOB_VERSION);
+    pushU32(SourceSignature(fontDir,langs,NL));
+    pushU16((uint16_t)lineHeight); pushU16((uint16_t)baseY); pushU16((uint16_t)maxH); pushU16(0);
+    pushU32((uint32_t)out.size());
+    for(const Out& o : out){
+        pushU32(o.code);
+        pushU16((uint16_t)o.w); pushU16((uint16_t)o.h);
+        pushS16((int16_t)o.xoff); pushS16((int16_t)(maxH-o.h)); pushS16((int16_t)o.adv); pushU16(0);
+        pushN(o.bmp.data(), o.bmp.size());
+    }
+
+    std::wstring tmp=blobPath+L".tmp";
+    HANDLE h=CreateFileW(tmp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(h==INVALID_HANDLE_VALUE) return false;
+    size_t done=0; DWORD wr=0; bool ok=true;
+    while(done<blob.size()){ if(!WriteFile(h,blob.data()+done,(DWORD)(blob.size()-done),&wr,nullptr)||wr==0){ok=false;break;} done+=wr; }
+    CloseHandle(h);
+    if(!ok){ DeleteFileW(tmp.c_str()); return false; }
+    MoveFileExW(tmp.c_str(),blobPath.c_str(),MOVEFILE_REPLACE_EXISTING);
+
+    // sidecar log so a first-run generation is auditable
+    char buf[256]; int n=wsprintfA(buf,"glyphs=%u maxH=%d lineHeight=%d base=%d bytes=%u\r\n",
+        (unsigned)out.size(),maxH,lineHeight,baseY,(unsigned)blob.size());
+    HANDLE lh=CreateFileW((blobPath+L".log").c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(lh!=INVALID_HANDLE_VALUE){ DWORD w2; WriteFile(lh,buf,(DWORD)n,&w2,nullptr); CloseHandle(lh); }
+    return true;
+}
+
+// (Re)generate the cache if missing or the source fonts changed. Cheap no-op when current.
+static void GenerateFontCacheIfNeeded(const std::wstring& dataDir, const std::wstring& blobPath){
+    std::wstring fontDir=dataDir+L"font\\";
+    const wchar_t* langs[]={L"english",L"japanese",L"korean",L"tchinese"};
+    uint32_t sig=SourceSignature(fontDir,langs,4);
+    std::vector<uint8_t> cur=ReadAll(blobPath);
+    if(cur.size()>=16 && memcmp(cur.data(),"MCTDEFNT",8)==0
+       && rdU32(&cur[8])==BLOB_VERSION && rdU32(&cur[12])==sig)
+        return;  // up to date
+    Generate(fontDir, blobPath);
+}
+
+} // namespace dsfont
+
+// ============================================================ DS covenant icon cache (classic mode)
+// Bakes 8 covenant/role icons out of the game's own icon atlases (menu\menu_0-tpf\Icon20.dds and
+// Icon40.dds) into mctde_dsicons.bin, which mctde_overlay draws next to phantom names in Classic
+// Font mode. Icon positions come straight from the params (EquipParamGoods/Accessory iconId), so
+// they are exact. Generated from the user's own files -- nothing copyrighted ships.
+namespace dsicons {
+
+static const uint32_t ICO_VERSION = 5;
+static const int ICO_SZ = 28;   // baked square size; overlay scales to line height
+static const int ICO_COUNT = 11;
+
+// type index -> (atlas 0=Icon20 / 1=Icon40 / 2=Icon30 / 3=Menu04_2, source cell rect on that atlas)
+struct IcoDef { int atlas, x0, y0, x1, y1; };
+static const IcoDef ICO[ICO_COUNT] = {
+    { 0,   0,   0,  81,  92 },  // 0 White Summon   : White Sign Soapstone (Icon20 cell0)
+    { 0,  81,   0, 163,  92 },  // 1 Red Summon     : Red Sign Soapstone   (cell1)
+    { 0, 163,   0, 246,  92 },  // 2 Red Invader    : Red Eye Orb          (cell2)
+    { 0, 819,   0, 901,  92 },  // 3 Darkmoon       : Blue Eye Orb         (cell10)
+    { 0, 246, 644, 328, 735 },  // 4 Gravelord      : Eye of Death         (cell87)
+    { 1, 409, 277, 491, 368 },  // 5 Forest Hunter  : Cat Covenant Ring    (Icon40 cell41)
+    { 0, 901, 184,1003, 277 },  // 6 Sun Summon     : Sunlight Medal       (cell35)
+    { 0, 901,   0,1003,  92 },  // 7 Dragon phantom : Dragon Eye           (cell11)
+    { 0, 410, 828, 492, 920 },  // 8 Host (human)   : Twin Humanities / Split Humanity (Icon20 col5,row9)
+    { 0, 328, 828, 410, 920 },  // 9 Host (hollow)  : Humanity                         (Icon20 col4,row9)
+    { 3, 126, 430, 168, 472 },  //10 Local marker   : gold lightning framed tile        (Menu04_2 col1,rowB)
+};
+
+// Decode a DXT5 (BC3) DDS to full RGBA.
+static void DecodeBC3RGBA(const uint8_t* dds, int W, int H, std::vector<uint8_t>& out){
+    out.assign((size_t)W*H*4, 0);
+    const uint8_t* blk = dds + 0x80; int bpr = W/4;
+    for(int by=0;by<H/4;++by) for(int bx=0;bx<bpr;++bx){
+        const uint8_t* b = blk + ((size_t)(by*bpr+bx)*16);
+        int a0=b[0],a1=b[1],ap[8]; ap[0]=a0; ap[1]=a1;
+        if(a0>a1){ for(int i=1;i<=6;++i) ap[i+1]=((7-i)*a0+i*a1+3)/7; }
+        else{ for(int i=1;i<=4;++i) ap[i+1]=((5-i)*a0+i*a1+2)/5; ap[6]=0; ap[7]=255; }
+        uint32_t alo=(uint32_t)b[2]|((uint32_t)b[3]<<8)|((uint32_t)b[4]<<16);
+        uint32_t ahi=(uint32_t)b[5]|((uint32_t)b[6]<<8)|((uint32_t)b[7]<<16);
+        uint16_t c0=(uint16_t)(b[8]|(b[9]<<8)), c1=(uint16_t)(b[10]|(b[11]<<8));
+        int r[4],g[4],bl[4];
+        r[0]=((c0>>11)&0x1f)*255/31; g[0]=((c0>>5)&0x3f)*255/63; bl[0]=(c0&0x1f)*255/31;
+        r[1]=((c1>>11)&0x1f)*255/31; g[1]=((c1>>5)&0x3f)*255/63; bl[1]=(c1&0x1f)*255/31;
+        r[2]=(2*r[0]+r[1])/3; g[2]=(2*g[0]+g[1])/3; bl[2]=(2*bl[0]+bl[1])/3;
+        r[3]=(r[0]+2*r[1])/3; g[3]=(g[0]+2*g[1])/3; bl[3]=(bl[0]+2*bl[1])/3;
+        uint32_t ci=(uint32_t)b[12]|((uint32_t)b[13]<<8)|((uint32_t)b[14]<<16)|((uint32_t)b[15]<<24);
+        for(int t=0;t<16;++t){
+            int ai = t<8 ? (int)((alo>>(3*t))&7) : (int)((ahi>>(3*(t-8)))&7);
+            int cx = (int)((ci>>(2*t))&3);
+            int px=bx*4+(t&3), py=by*4+(t>>2); size_t o=((size_t)py*W+px)*4;
+            out[o]=(uint8_t)r[cx]; out[o+1]=(uint8_t)g[cx]; out[o+2]=(uint8_t)bl[cx]; out[o+3]=(uint8_t)ap[ai];
+        }
+    }
+}
+
+// mask -> right-shift (trailing zero bits)
+static int MaskShift(uint32_t m){ if(!m) return 0; int s=0; while(!(m&1)){ m>>=1; ++s; } return s; }
+
+// Extract the raw DDS bytes of a named texture out of a DS1 PTDE .tpf. Entries are 0x14 bytes
+// (dataOffset, dataSize, format/type/mip/flags, nameOffset, unk); names are null-terminated ASCII at
+// nameOffset. Matches on the basename (case-insensitive) so "Icon20" finds it regardless of any path.
+// Validates the DDS magic before returning. This is how normal (UDSFM-only, not Yabber-unpacked)
+// installs are read -- the loose DDS path is just a fast pre-check for further-unpacked installs.
+static bool TpfExtractDDS(const std::wstring& tpfPath, const char* texName, std::vector<uint8_t>& out){
+    std::vector<uint8_t> d = dsfont::ReadAll(tpfPath);
+    if(d.size()<0x10 || !(d[0]=='T'&&d[1]=='P'&&d[2]=='F'&&d[3]==0)) return false;   // magic is "TPF\0"
+    uint32_t count = dsfont::rdU32(&d[8]);
+    if(count==0 || count>4096) return false;
+    const size_t ENT=0x14;
+    if(0x10+(size_t)count*ENT > d.size()) return false;
+    for(uint32_t i=0;i<count;++i){
+        const uint8_t* e=&d[0x10+(size_t)i*ENT];
+        uint32_t off=dsfont::rdU32(e), sz=dsfont::rdU32(e+4), noff=dsfont::rdU32(e+0x0C);
+        if(noff>=d.size()) continue;
+        size_t maxn=d.size()-noff, nl=0; while(nl<maxn && d[noff+nl]) ++nl;
+        std::string name((const char*)&d[noff], nl);
+        size_t slash=name.find_last_of("\\/"); const char* base = (slash==std::string::npos)? name.c_str() : name.c_str()+slash+1;
+        if(_stricmp(base, texName)!=0) continue;
+        if((size_t)off+sz > d.size() || sz<0x80) return false;
+        if(!(d[off]=='D'&&d[off+1]=='D'&&d[off+2]=='S'&&d[off+3]==' ')) return false;
+        out.assign(d.begin()+off, d.begin()+off+sz);
+        return true;
+    }
+    return false;
+}
+
+// Parse a DDS (DXT5 or uncompressed 32-bit) already in memory to RGBA. Returns false if unsupported.
+static bool LoadDDSBytes(const std::vector<uint8_t>& d, std::vector<uint8_t>& rgba, int& W, int& H){
+    if(d.size()<0x80 || !(d[0]=='D'&&d[1]=='D'&&d[2]=='S'&&d[3]==' ')) return false;
+    H = (int)dsfont::rdU32(&d[0x0C]); W = (int)dsfont::rdU32(&d[0x10]);
+    if(W<=0||H<=0||W>8192||H>8192) return false;
+
+    if(d[0x54]=='D'&&d[0x55]=='X'&&d[0x56]=='T'&&d[0x57]=='5'){        // BC3 / DXT5
+        if((W&3)||(H&3)) return false;
+        if((size_t)0x80 + (size_t)(W/4)*(H/4)*16 > d.size()) return false;
+        DecodeBC3RGBA(d.data(), W, H, rgba);
+        return true;
+    }
+    // Uncompressed 32bpp (some atlases, e.g. Icon40, ship as raw A8R8G8B8, odd widths allowed).
+    uint32_t bits = dsfont::rdU32(&d[0x58]);
+    if(bits == 32){
+        if((size_t)0x80 + (size_t)W*H*4 > d.size()) return false;
+        uint32_t rm=dsfont::rdU32(&d[0x5C]), gm=dsfont::rdU32(&d[0x60]), bm=dsfont::rdU32(&d[0x64]), am=dsfont::rdU32(&d[0x68]);
+        if(!rm&&!gm&&!bm){ rm=0x00FF0000; gm=0x0000FF00; bm=0x000000FF; am=0xFF000000; }  // assume A8R8G8B8
+        int rs=MaskShift(rm), gs=MaskShift(gm), bs=MaskShift(bm), as=MaskShift(am);
+        rgba.assign((size_t)W*H*4, 0);
+        const uint8_t* px = &d[0x80];
+        for(size_t i=0; i<(size_t)W*H; ++i){
+            uint32_t v = dsfont::rdU32(px + i*4);
+            rgba[i*4+0]=(uint8_t)((v&rm)>>rs);
+            rgba[i*4+1]=(uint8_t)((v&gm)>>gs);
+            rgba[i*4+2]=(uint8_t)((v&bm)>>bs);
+            rgba[i*4+3]= am ? (uint8_t)((v&am)>>as) : 255;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool LoadDDS(const std::wstring& path, std::vector<uint8_t>& rgba, int& W, int& H){
+    std::vector<uint8_t> d = dsfont::ReadAll(path);
+    return LoadDDSBytes(d, rgba, W, H);
+}
+
+// Load a source atlas by texture name: prefer the loose DDS (Yabber-unpacked installs), otherwise
+// pull it straight out of the packed .tpf (the normal UDSFM-only layout most users have).
+static bool LoadAtlas(const std::wstring& looseDdsPath, const std::wstring& tpfPath, const char* texName,
+                      std::vector<uint8_t>& rgba, int& W, int& H){
+    if(LoadDDS(looseDdsPath, rgba, W, H)) return true;
+    std::vector<uint8_t> dds;
+    if(TpfExtractDDS(tpfPath, texName, dds) && LoadDDSBytes(dds, rgba, W, H)) return true;
+    return false;
+}
+
+// Alpha-weighted box downscale of a source rect into an SZ x SZ RGBA icon.
+static void ExtractIcon(const std::vector<uint8_t>& src, int W, int H, const IcoDef& r, std::vector<uint8_t>& out){
+    out.assign((size_t)ICO_SZ*ICO_SZ*4, 0);
+    int sw=r.x1-r.x0, sh=r.y1-r.y0; if(sw<=0||sh<=0) return;
+    for(int dy=0;dy<ICO_SZ;++dy) for(int dx=0;dx<ICO_SZ;++dx){
+        int sx0=r.x0+dx*sw/ICO_SZ, sx1=r.x0+(dx+1)*sw/ICO_SZ; if(sx1<=sx0)sx1=sx0+1;
+        int sy0=r.y0+dy*sh/ICO_SZ, sy1=r.y0+(dy+1)*sh/ICO_SZ; if(sy1<=sy0)sy1=sy0+1;
+        long ar=0,ag=0,ab=0,aa=0,n=0;
+        for(int sy=sy0;sy<sy1;++sy) for(int sx=sx0;sx<sx1;++sx){
+            if(sx<0||sy<0||sx>=W||sy>=H) continue; size_t o=((size_t)sy*W+sx)*4; int al=src[o+3];
+            ar+=(long)src[o]*al; ag+=(long)src[o+1]*al; ab+=(long)src[o+2]*al; aa+=al; n++;
+        }
+        size_t o=((size_t)dy*ICO_SZ+dx)*4;
+        if(aa>0){ out[o]=(uint8_t)(ar/aa); out[o+1]=(uint8_t)(ag/aa); out[o+2]=(uint8_t)(ab/aa); out[o+3]=(uint8_t)(aa/(n>0?n:1)); }
+    }
+}
+
+static uint32_t IconSignature(const std::wstring& dataDir){
+    uint32_t hsh=2166136261u;
+    auto mix=[&](const void* pp,size_t n){ const uint8_t* p=(const uint8_t*)pp; for(size_t i=0;i<n;++i){ hsh^=p[i]; hsh*=16777619u; } };
+    auto stat=[&](const std::wstring& path){ WIN32_FILE_ATTRIBUTE_DATA fa;
+        if(GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&fa)){ mix(&fa.nFileSizeLow,4); mix(&fa.ftLastWriteTime,sizeof(FILETIME)); } };
+    std::wstring m0=dataDir+L"menu\\menu_0-tpf\\", m1=dataDir+L"menu\\menu_1-tpf\\";
+    stat(m0+L"Icon20.dds"); stat(m0+L"Icon40.dds"); stat(m0+L"Icon30.dds"); stat(m1+L"Menu04_2.dds");  // loose (if unpacked)
+    stat(dataDir+L"menu\\menu_0.tpf"); stat(dataDir+L"menu\\menu_1.tpf");                                // packed (normal layout)
+    hsh ^= ICO_VERSION*2654435761u; return hsh;
+}
+
+static void GenerateIconCacheIfNeeded(const std::wstring& dataDir, const std::wstring& blobPath){
+    std::wstring menuDir  = dataDir + L"menu\\menu_0-tpf\\";   // loose DDS if this install unpacked the TPFs
+    std::wstring menu1Dir = dataDir + L"menu\\menu_1-tpf\\";   // Menu04_2 (framed item tiles) lives here
+    std::wstring tpf0 = dataDir + L"menu\\menu_0.tpf";         // packed source (Icon atlases)
+    std::wstring tpf1 = dataDir + L"menu\\menu_1.tpf";         // packed source (Menu screens)
+    uint32_t sig = IconSignature(dataDir);
+    std::vector<uint8_t> cur = dsfont::ReadAll(blobPath);
+    if(cur.size()>=16 && memcmp(cur.data(),"MCTDEICO",8)==0
+       && dsfont::rdU32(&cur[8])==ICO_VERSION && dsfont::rdU32(&cur[12])==sig)
+        return; // up to date
+
+    std::vector<uint8_t> a20, a40, a30, aM042; int w20=0,h20=0,w40=0,h40=0,w30=0,h30=0,wM042=0,hM042=0;
+    bool ok20 = LoadAtlas(menuDir+L"Icon20.dds",   tpf0, "Icon20",   a20, w20, h20);
+    bool ok40 = LoadAtlas(menuDir+L"Icon40.dds",   tpf0, "Icon40",   a40, w40, h40);
+    bool ok30 = LoadAtlas(menuDir+L"Icon30.dds",   tpf0, "Icon30",   a30, w30, h30);
+    bool okM042 = LoadAtlas(menu1Dir+L"Menu04_2.dds", tpf1, "Menu04_2", aM042, wM042, hM042);
+    if(!ok20) return;   // Icon20 required; Icon40 / Icon30 / Menu04_2 optional
+
+    std::vector<uint8_t> blob; blob.reserve((size_t)ICO_COUNT*ICO_SZ*ICO_SZ*4 + 64);
+    auto pushN=[&](const void* p,size_t n){ const uint8_t* b=(const uint8_t*)p; blob.insert(blob.end(),b,b+n); };
+    auto pU32=[&](uint32_t v){ pushN(&v,4); }; auto pU16=[&](uint16_t v){ pushN(&v,2); };
+    pushN("MCTDEICO",8); pU32(ICO_VERSION); pU32(sig); pU16((uint16_t)ICO_SZ); pU16((uint16_t)ICO_COUNT);
+    for(int i=0;i<ICO_COUNT;++i){
+        std::vector<uint8_t> ic;
+        if(ICO[i].atlas==0)                  ExtractIcon(a20,w20,h20,ICO[i],ic);
+        else if(ICO[i].atlas==1 && ok40)     ExtractIcon(a40,w40,h40,ICO[i],ic);
+        else if(ICO[i].atlas==2 && ok30)     ExtractIcon(a30,w30,h30,ICO[i],ic);
+        else if(ICO[i].atlas==3 && okM042)   ExtractIcon(aM042,wM042,hM042,ICO[i],ic);
+        else                                 ic.assign((size_t)ICO_SZ*ICO_SZ*4,0);   // source atlas missing -> blank
+        pU16((uint16_t)ICO_SZ); pU16((uint16_t)ICO_SZ);
+        pushN(ic.data(), ic.size());
+    }
+    std::wstring tmp=blobPath+L".tmp";
+    HANDLE h=CreateFileW(tmp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(h==INVALID_HANDLE_VALUE) return;
+    DWORD wr=0; size_t done=0; bool okw=true;
+    while(done<blob.size()){ if(!WriteFile(h,blob.data()+done,(DWORD)(blob.size()-done),&wr,nullptr)||wr==0){okw=false;break;} done+=wr; }
+    CloseHandle(h);
+    if(okw) MoveFileExW(tmp.c_str(),blobPath.c_str(),MOVEFILE_REPLACE_EXISTING); else DeleteFileW(tmp.c_str());
+}
+
+} // namespace dsicons
+
+// ============================================================ HP gauge frame cache (Souls-style bar)
+// Bakes the game's OWN segmented HP-gauge frame out of menu\menu_1-tpf\Menu08.dds into
+// mctde_dsgauge.bin, which the overlay blits over its red fill so the phantom-list HP bar matches the
+// in-game gauge (black ruler frame: divider + minor ticks + a bold right end-cap). Two RGBA slices are
+// stored: a 52x18 middle tile that tiles horizontally at native scale (its own left edge is a divider,
+// so it doubles as the left border), and an 8x18 right end-cap. Slice rects were measured pixel-exact
+// from the atlas. Generated from the user's own files -- nothing copyrighted ships.
+namespace dsgauge {
+
+static const uint32_t GAU_VERSION = 4;
+struct Rect { int x, y, w, h; };
+// The HP-gauge ruler frame is the finer band at y438-451 (NOT the coarser one lower in the atlas).
+// The tile starts at y438 (the solid top bar); y437 above it is a speckly dashed row -- excluded so
+// no semi-transparent junk hangs above the bar.
+static const Rect GAU_TILE = { 124, 438, 51, 14 };  // divider + 4 minor ticks + continuous top/bottom bars
+static const Rect GAU_CAP  = { 123, 438,  4, 14 };  // clean divider closing the bar's right edge
+
+// Copy an RGBA sub-rect out of a decoded atlas (src is W*H RGBA).
+static void ExtractRect(const std::vector<uint8_t>& src, int W, int H, const Rect& r, std::vector<uint8_t>& out){
+    out.assign((size_t)r.w*r.h*4, 0);
+    for(int j=0;j<r.h;++j) for(int i=0;i<r.w;++i){
+        int sx=r.x+i, sy=r.y+j; if(sx<0||sy<0||sx>=W||sy>=H) continue;
+        size_t s=((size_t)sy*W+sx)*4, d=((size_t)j*r.w+i)*4;
+        out[d]=src[s]; out[d+1]=src[s+1]; out[d+2]=src[s+2]; out[d+3]=src[s+3];
+    }
+}
+
+static uint32_t GaugeSignature(const std::wstring& dataDir){
+    uint32_t hsh=2166136261u;
+    auto mix=[&](const void* pp,size_t n){ const uint8_t* p=(const uint8_t*)pp; for(size_t i=0;i<n;++i){ hsh^=p[i]; hsh*=16777619u; } };
+    auto stat=[&](const std::wstring& path){ WIN32_FILE_ATTRIBUTE_DATA fa;
+        if(GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&fa)){ mix(&fa.nFileSizeLow,4); mix(&fa.ftLastWriteTime,sizeof(FILETIME)); } };
+    stat(dataDir+L"menu\\menu_1-tpf\\Menu08.dds");   // loose (if unpacked)
+    stat(dataDir+L"menu\\menu_1.tpf");               // packed (normal layout)
+    hsh ^= GAU_VERSION*2654435761u; return hsh;
+}
+
+static void GenerateGaugeCacheIfNeeded(const std::wstring& dataDir, const std::wstring& blobPath){
+    uint32_t sig = GaugeSignature(dataDir);
+    std::vector<uint8_t> cur = dsfont::ReadAll(blobPath);
+    if(cur.size()>=16 && memcmp(cur.data(),"MCTDEGAU",8)==0
+       && dsfont::rdU32(&cur[8])==GAU_VERSION && dsfont::rdU32(&cur[12])==sig)
+        return; // up to date
+
+    std::vector<uint8_t> atlas; int W=0,H=0;
+    if(!dsicons::LoadAtlas(dataDir+L"menu\\menu_1-tpf\\Menu08.dds", dataDir+L"menu\\menu_1.tpf", "Menu08", atlas, W, H)) return;
+    if(GAU_TILE.x+GAU_TILE.w>W || GAU_TILE.y+GAU_TILE.h>H ||
+       GAU_CAP.x+GAU_CAP.w>W || GAU_CAP.y+GAU_CAP.h>H) return;
+
+    std::vector<uint8_t> tile, cap;
+    ExtractRect(atlas, W, H, GAU_TILE, tile);
+    ExtractRect(atlas, W, H, GAU_CAP,  cap);
+
+    std::vector<uint8_t> blob; blob.reserve(tile.size()+cap.size()+64);
+    auto pushN=[&](const void* p,size_t n){ const uint8_t* b=(const uint8_t*)p; blob.insert(blob.end(),b,b+n); };
+    auto pU32=[&](uint32_t v){ pushN(&v,4); }; auto pU16=[&](uint16_t v){ pushN(&v,2); };
+    pushN("MCTDEGAU",8); pU32(GAU_VERSION); pU32(sig);
+    pU16((uint16_t)GAU_TILE.w); pU16((uint16_t)GAU_TILE.h);
+    pU16((uint16_t)GAU_CAP.w);  pU16((uint16_t)GAU_CAP.h);
+    pushN(tile.data(), tile.size());
+    pushN(cap.data(),  cap.size());
+
+    std::wstring tmp=blobPath+L".tmp";
+    HANDLE h=CreateFileW(tmp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(h==INVALID_HANDLE_VALUE) return;
+    DWORD wr=0; size_t done=0; bool okw=true;
+    while(done<blob.size()){ if(!WriteFile(h,blob.data()+done,(DWORD)(blob.size()-done),&wr,nullptr)||wr==0){okw=false;break;} done+=wr; }
+    CloseHandle(h);
+    if(okw) MoveFileExW(tmp.c_str(),blobPath.c_str(),MOVEFILE_REPLACE_EXISTING); else DeleteFileW(tmp.c_str());
+}
+
+} // namespace dsgauge
+
 static bool LaunchGame() {
     // Mark the game process as launcher-spawned so mctde-Link's launcher guard lets it run
     // (the child inherits this env var). Without it, the mod relaunches the launcher and quits.
@@ -706,6 +1190,17 @@ static bool LaunchGame() {
 
     // Keep this install on the shared mctde matchmaking appid before the game's Steam init runs.
     EnsureSteamAppId();
+
+    // Bake the game's own DSFont24 UI font (+ CJK from the other language packs, for Steam names)
+    // into the overlay's font cache. First launch does the extraction; later launches no-op unless
+    // the source fonts changed. Blocks briefly here by design -- must exist before the overlay loads.
+    {
+        std::wstring cld = ChainloadDir();
+        CreateDirectoryW(cld.c_str(), nullptr);
+        dsfont::GenerateFontCacheIfNeeded(g_dir, cld + L"mctde_dsfont.bin");
+        dsicons::GenerateIconCacheIfNeeded(g_dir, cld + L"mctde_dsicons.bin");
+        dsgauge::GenerateGaugeCacheIfNeeded(g_dir, cld + L"mctde_dsgauge.bin");
+    }
 
     // Unless the user opted into AA via the DSFix config's Advanced Options, force antialiasing
     // off in dsfix.ini before launch -- SMAA/SSAO collide with the overlay and corrupt the world
@@ -1172,7 +1667,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         U.fpsLimit = DsMakeEdit(hWnd, IDC_DS_FPSLIMIT, G("FPSlimit", "30"), 0, 0, 56);
         U.lblFpsThresh = DsMakeLabel(hWnd, L"FPS threshold", 0, 0, 92);
         U.fpsThresh = DsMakeEdit(hWnd, IDC_DS_FPSTHRESH, G("FPSthreshold", "28"), 0, 0, 56);
-        U.fpsStab = DsMakeCheck(hWnd, IDC_DS_FPSSTAB, L"FPS Stabilizer", G("unlockFPS", "1") != "0");
+        U.fpsStab = DsMakeCheck(hWnd, IDC_DS_FPSSTAB, L"FPS Stabilizer (causes microstutters)", G("unlockFPS", "1") != "0");
         // Snapshot the basic-mode toggle states so Save can tell whether the user changed them.
         g_fpsStabInit = CtlChecked(U.fpsStab);
         g_defDofInit = CtlChecked(U.defDof);
@@ -1555,17 +2050,30 @@ static const int MC_NDEF = (int)(sizeof(g_def) / sizeof(g_def[0]));
 
 struct McUi {
     HWND view, adv, save, cancel;
-    HWND hdrOv, lblFont, font, lblSize, size, lblHpSize, hpSize, lblCorner, corner, lblPadX, padX, lblPadY, padY;
-    HWND showHeader, showHp, hpBars, showPing, showName, forceTop, preview;
+    HWND hdrOv, classicFont, lblFont, font, lblSize, size, lblHpSize, hpSize, lblCorner, corner, lblPadX, padX, lblPadY, padY;
+    HWND showHeader, lblHpDisp, hpDisp, showPing, showName, forceTop, preview;
     HWND ctl[64], lbl[64];      // data-driven table (>= MC_NDEF)
 };
 static McUi M;
 static int  g_mcScroll = 0;
 static bool g_mcAdv = false;
 
+// HP Display dropdown: one control replaces the old Show-HP + HP-as-a-bar checkboxes.
+// Index 0 = numeric readout; 1..3 = bar with sub-style minimal/damage/detailed.
+static const wchar_t* const kHpDisplayItems[] = {
+    L"Numeric Value", L"Health Bar (minimal)", L"Health Bar (damage)", L"Health Bar (detailed)"
+};
+static const int kHpDisplayCount = (int)(sizeof(kHpDisplayItems) / sizeof(kHpDisplayItems[0]));
+// Map the saved [Overlay] HpBars / HpBarStyle pair to a dropdown index (0..3).
+static int HpDisplayIndex(bool bars, int barStyle) {
+    if (!bars) return 0;
+    if (barStyle < 0) barStyle = 0; if (barStyle > 2) barStyle = 2;
+    return 1 + barStyle;
+}
+
 // live preview state, refreshed from the controls by McSync()
-struct McPv { std::wstring font; int size, hpSize, corner, padX, padY; bool hdr, hp, bars, ping, name; };
-static McPv g_pv = { L"Tahoma", 24, 48, 0, 5, 5, true, true, false, true, true };
+struct McPv { std::wstring font; int size, hpSize, corner, padX, padY; bool hdr, hp, bars, ping, name; int barStyle; };
+static McPv g_pv = { L"Tahoma", 24, 48, 0, 5, 5, true, true, false, true, true, 0 };
 
 static bool McIsHeader(HWND h) {
     for (int i = 0; i < MC_NDEF; ++i)
@@ -1581,8 +2089,10 @@ static void McSync() {
     g_pv.padX   = (int)SendMessageW(M.padX, TBM_GETPOS, 0, 0);
     g_pv.padY   = (int)SendMessageW(M.padY, TBM_GETPOS, 0, 0);
     g_pv.hdr    = CtlChecked(M.showHeader);
-    g_pv.hp     = CtlChecked(M.showHp);
-    g_pv.bars   = CtlChecked(M.hpBars);
+    int hd      = max(0, (int)SendMessageW(M.hpDisp, CB_GETCURSEL, 0, 0));
+    g_pv.hp     = true;                         // every HP Display mode shows HP in some form
+    g_pv.bars   = (hd != 0);                    // 0 = numeric, 1..3 = bar styles
+    g_pv.barStyle = (hd <= 1) ? 0 : (hd - 1);   // 0 minimal, 1 damage, 2 detailed
     g_pv.ping   = CtlChecked(M.showPing);
     g_pv.name   = CtlChecked(M.showName);
     if (M.preview) InvalidateRect(M.preview, nullptr, TRUE);
@@ -1624,6 +2134,10 @@ static LRESULT CALLBACK McPreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         static const Row rows[] = { { L"42ms", L"Solaire" }, { L"88ms", L"Lautrec" }, { L"120ms", L"Siegmeyer" } };
         int nRows = (int)(sizeof(rows) / sizeof(rows[0]));
         const wchar_t* hpSample = L"1650HP";
+        // Per-row sample numbers for the bar sub-styles: HP fills 100% / 66% / 33% down the list,
+        // and the middle row is the one "taking damage" (it carries the yellow chip).
+        static const wchar_t* const hpNums[] = { L"1650", L"1100", L"550" };
+        const wchar_t* dmgSample = L"240";
         int hpW = 0, hpGap = 0;
         if (g_pv.hp) {
             if (g_pv.bars) hpW = (int)(hpFpx * 5.2);          // bars are 2x wide
@@ -1666,6 +2180,15 @@ static LRESULT CALLBACK McPreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (g_pv.ping) { SIZE z; GetTextExtentPoint32W(dc, rows[i].ping, (int)wcslen(rows[i].ping), &z); pingW = z.cx; }
             int gap = max(3, fpx / 3);
 
+            // yellow-on-black damage number centred vertically in the bar, left- or right-hugging
+            auto drawInBar = [&](int xx, int barY, int barH, const wchar_t* s, bool onRight) {
+                SelectObject(dc, f);
+                int n = (int)wcslen(s); SIZE z; GetTextExtentPoint32W(dc, s, n, &z);
+                int tx = onRight ? (xx + hpW - z.cx - 3) : (xx + 3);
+                int tyv = barY + (barH - z.cy) / 2;
+                SetTextColor(dc, RGB(0, 0, 0)); TextOutW(dc, tx + 1, tyv + 1, s, n);
+                SetTextColor(dc, RGB(230, 205, 55)); TextOutW(dc, tx, tyv, s, n);
+            };
             auto drawHP = [&](int xx) {
                 if (g_pv.bars) {
                     int barH = max(3, (int)(hpFpx * 0.7)); int barY = ty + (lh - barH) / 2;
@@ -1674,13 +2197,20 @@ static LRESULT CALLBACK McPreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                     int curW = (hpW * (3 - i)) / 3, ghostW = (hpW * 3) / 4;
                     if (i == 1) { RECT yr = { xx + curW, barY, xx + ghostW, barY + barH }; HBRUSH yb = CreateSolidBrush(RGB(230, 205, 55)); FillRect(dc, &yr, yb); DeleteObject(yb); }
                     RECT bf = { xx, barY, xx + curW, barY + barH }; HBRUSH gb = CreateSolidBrush(RGB(95, 175, 75)); FillRect(dc, &bf, gb); DeleteObject(gb);
+                    bool lowHp = (3 - i) * 2 < 3;   // current fill below half -> number hugs the right
+                    // Both damage and detailed print the just-lost damage inside the bar (the middle
+                    // row is the one taking damage / carrying the yellow chip).
+                    if ((g_pv.barStyle == 1 || g_pv.barStyle == 2) && i == 1)
+                        drawInBar(xx, barY, barH, dmgSample, lowHp);
+                    SelectObject(dc, f);
                 } else {
                     SelectObject(dc, hf); SetTextColor(dc, RGB(220, 220, 225));
                     TextOutW(dc, xx, ty + (lh - hpFpx) / 2, hpSample, 6); SelectObject(dc, f);
                 }
             };
             auto drawPing = [&](int xx) { SetTextColor(dc, RGB(170, 200, 235)); TextOutW(dc, xx, ty, rows[i].ping, (int)wcslen(rows[i].ping)); };
-            auto drawName = [&](int xx) { SetTextColor(dc, RGB(232, 232, 236)); TextOutW(dc, xx, ty, rows[i].name, (int)wcslen(rows[i].name)); };
+            int nameDrawX = -1;
+            auto drawName = [&](int xx) { nameDrawX = xx; SetTextColor(dc, RGB(232, 232, 236)); TextOutW(dc, xx, ty, rows[i].name, (int)wcslen(rows[i].name)); };
 
             // right-justify the row against the block's right edge on right-side corners
             int nEl = (g_pv.hp ? 1 : 0) + (g_pv.ping ? 1 : 0) + (g_pv.name ? 1 : 0);
@@ -1694,6 +2224,16 @@ static LRESULT CALLBACK McPreviewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 if (g_pv.name) { drawName(cx); cx += nameW + gap; }
                 if (g_pv.ping) { drawPing(cx); cx += pingW + gap; }
                 if (g_pv.hp)   { drawHP(cx); }
+            }
+            // Detailed style: the HP number in white, on the outer side of the name (left of the
+            // name when right-anchored, else to its right). Persistent, shown on every row.
+            if (g_pv.bars && g_pv.barStyle == 2 && g_pv.name && nameDrawX >= 0) {
+                SelectObject(dc, f);
+                const wchar_t* s = hpNums[i];
+                int n = (int)wcslen(s); SIZE z; GetTextExtentPoint32W(dc, s, n, &z);
+                int dx = rightAlign ? (nameDrawX - gap - z.cx) : (nameDrawX + nameW + gap);
+                SetTextColor(dc, RGB(0, 0, 0)); TextOutW(dc, dx + 1, ty + 1, s, n);
+                SetTextColor(dc, RGB(255, 255, 255)); TextOutW(dc, dx, ty, s, n);
             }
             ty += lh;
         }
@@ -1761,6 +2301,7 @@ static int McLayout() {
     // ---- Overlay group (special widgets) + live preview on the right ----
     SetWindowPos(M.hdrOv, nullptr, LX, y - s, 240, 18, SWP_NOZORDER); y += HDRH;
     int ovTop = y;
+    P(M.classicFont, LX, y, 260, 22); y += 23;
     P(M.lblFont,   LX, y + 3, 96, 18); P(M.font,   LX + 60, y, 188, 200); y += ROW;
     P(M.lblSize,   LX, y + 3, 96, 18); P(M.size,   LX + 60, y, 56, 22);   y += ROW;
     P(M.lblHpSize, LX, y + 3, 56, 18); P(M.hpSize, LX + 60, y, 188, 26);  y += ROW;
@@ -1768,8 +2309,7 @@ static int McLayout() {
     P(M.lblPadX,   LX, y + 3, 56, 18); P(M.padX,   LX + 60, y, 188, 26);  y += ROW;
     P(M.lblPadY,   LX, y + 3, 56, 18); P(M.padY,   LX + 60, y, 188, 26);  y += ROW;
     P(M.showHeader, LX, y, 240, 22); y += 23;
-    P(M.showHp,     LX, y, 240, 22); y += 23;
-    P(M.hpBars,     LX + 18, y, 240, 22); y += 23;   // sub-option of Show HP
+    P(M.lblHpDisp,  LX, y + 3, 70, 18); P(M.hpDisp, LX + 60, y, 188, 220); y += ROW;
     P(M.showPing,   LX, y, 240, 22); y += 23;
     P(M.showName,   LX, y, 240, 22); y += 23;
     P(M.forceTop,   LX, y, 240, 22); y += 23;
@@ -1882,14 +2422,21 @@ static void McSave() {
     }
     // overlay specials
     MlSet(L"Overlay", L"FontFace",  CtlComboW(M.font));
+    MlSet(L"Overlay", L"UseDsFont", CtlChecked(M.classicFont) ? L"1" : L"0");
     MlSet(L"Overlay", L"FontHeight",CtlTextW(M.size));
     MlSet(L"Overlay", L"HpFontHeight", std::to_wstring((int)SendMessageW(M.hpSize, TBM_GETPOS, 0, 0)));
     MlSet(L"Overlay", L"Corner",    CtlComboW(M.corner));
     MlSet(L"Overlay", L"PaddingX",  std::to_wstring((int)SendMessageW(M.padX, TBM_GETPOS, 0, 0)));
     MlSet(L"Overlay", L"PaddingY",  std::to_wstring((int)SendMessageW(M.padY, TBM_GETPOS, 0, 0)));
     MlSet(L"Overlay", L"ShowHeader",CtlChecked(M.showHeader) ? L"1" : L"0");
-    MlSet(L"Overlay", L"ShowHp",    CtlChecked(M.showHp)     ? L"1" : L"0");
-    MlSet(L"Overlay", L"HpBars",    CtlChecked(M.hpBars)     ? L"1" : L"0");
+    // HP Display dropdown -> the three underlying keys. Every mode shows HP, so ShowHp stays 1
+    // (hiding the HP column entirely is still done via "Show HP readout" = [HP] Enabled).
+    {
+        int hd = max(0, (int)SendMessageW(M.hpDisp, CB_GETCURSEL, 0, 0));
+        MlSet(L"Overlay", L"ShowHp",     L"1");
+        MlSet(L"Overlay", L"HpBars",     hd == 0 ? L"0" : L"1");
+        MlSet(L"Overlay", L"HpBarStyle", std::to_wstring(hd <= 1 ? 0 : hd - 1));
+    }
     MlSet(L"Overlay", L"ShowPing",  CtlChecked(M.showPing)   ? L"1" : L"0");
     MlSet(L"Overlay", L"ShowName",  CtlChecked(M.showName)   ? L"1" : L"0");
     MlSet(L"Overlay", L"ForceTopmost", CtlChecked(M.forceTop) ? L"1" : L"0");
@@ -1919,9 +2466,17 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
         // --- special Overlay widgets (children of the viewport) ---
         M.hdrOv     = DsMakeLabel(M.view, L"Overlay", 0, 0, 240);
+        M.classicFont = DsMakeCheck(M.view, IDC_MC_CLASSICFONT, L"Classic Font (Dark Souls in-game font)",
+                                    MlGetInt(L"Overlay", L"UseDsFont", 0) != 0);
         M.lblFont   = DsMakeLabel(M.view, L"Font", 0, 0, 96);
         std::vector<std::wstring> fonts = EnumInstalledFonts();
         M.font      = McFontCombo(M.view, IDC_MC_FONT, 188, fonts, MlGetW(L"Overlay", L"FontFace", L"Tahoma"));
+        // Classic Font uses the baked DS bitmap font, so the system-font picker doesn't apply.
+        {
+            bool classic = CtlChecked(M.classicFont);
+            EnableWindow(M.font, !classic);
+            EnableWindow(M.lblFont, !classic);
+        }
         M.lblSize   = DsMakeLabel(M.view, L"Font size", 0, 0, 96);
         M.size      = DsMakeEdit(M.view, IDC_MC_SIZE, NarrowOf(MlGetW(L"Overlay", L"FontHeight", L"24")), 0, 0, 56);
         M.lblHpSize = DsMakeLabel(M.view, L"HP size", 0, 0, 96);
@@ -1935,8 +2490,12 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         M.lblPadY   = DsMakeLabel(M.view, L"Padding Y", 0, 0, 56);
         M.padY      = McSlider(M.view, IDC_MC_PADY, 0, 400, MlGetInt(L"Overlay", L"PaddingY", 5));
         M.showHeader= DsMakeCheck(M.view, IDC_MC_SHOWHDR,  L"Show \"mctde\" header", MlGetInt(L"Overlay", L"ShowHeader", 1) != 0);
-        M.showHp    = DsMakeCheck(M.view, IDC_MC_SHOWHP,   L"Show HP", MlGetInt(L"Overlay", L"ShowHp", 1) != 0);
-        M.hpBars    = DsMakeCheck(M.view, IDC_MC_HPBARS,   L"Render HP as a bar (not a number)", MlGetInt(L"Overlay", L"HpBars", 0) != 0);
+        M.lblHpDisp = DsMakeLabel(M.view, L"HP Display", 0, 0, 70);
+        {
+            std::vector<std::wstring> hpItems(kHpDisplayItems, kHpDisplayItems + kHpDisplayCount);
+            int hd = HpDisplayIndex(MlGetInt(L"Overlay", L"HpBars", 0) != 0, MlGetInt(L"Overlay", L"HpBarStyle", 0));
+            M.hpDisp = DsMakeCombo(M.view, IDC_MC_HPDISP, 0, 0, 188, hpItems, NarrowOf(kHpDisplayItems[hd]));
+        }
         M.showPing  = DsMakeCheck(M.view, IDC_MC_SHOWPING, L"Show ping", MlGetInt(L"Overlay", L"ShowPing", 1) != 0);
         M.showName  = DsMakeCheck(M.view, IDC_MC_SHOWNAME, L"Show names", MlGetInt(L"Overlay", L"ShowName", 1) != 0);
         M.forceTop  = DsMakeCheck(M.view, IDC_MC_FORCETOP, L"Force overlay always-on-top", MlGetInt(L"Overlay", L"ForceTopmost", 0) != 0);
@@ -1968,6 +2527,12 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_MC_ADV:    g_mcAdv = CtlChecked(M.adv); g_mcScroll = 0; McRelayout(); return 0;
+        case IDC_MC_CLASSICFONT: {
+            bool classic = CtlChecked(M.classicFont);
+            EnableWindow(M.font, !classic);       // grey out the system-font picker in Classic Font mode
+            EnableWindow(M.lblFont, !classic);
+            return 0;
+        }
         case IDC_MC_SAVE:   McSave(); DestroyWindow(hWnd); return 0;
         case IDC_MC_CANCEL: DestroyWindow(hWnd); return 0;
         }
@@ -2686,6 +3251,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     // Regenerate a full, documented mctde-link.ini if it's missing, BEFORE anything reads or
     // writes a key (a key-at-a-time write would otherwise leave a bare-bones file).
     EnsureIniSeeded();
+
+    // Headless font-cache build: `mctde_launcher.exe --genfont` extracts the DSFont blob and exits
+    // (no window). Used for testing/first-run priming without launching the game.
+    if (wcsstr(GetCommandLineW(), L"--genfont")) {
+        std::wstring cld = ChainloadDir();
+        CreateDirectoryW(cld.c_str(), nullptr);
+        dsfont::GenerateFontCacheIfNeeded(g_dir, cld + L"mctde_dsfont.bin");
+        dsicons::GenerateIconCacheIfNeeded(g_dir, cld + L"mctde_dsicons.bin");
+        dsgauge::GenerateGaugeCacheIfNeeded(g_dir, cld + L"mctde_dsgauge.bin");
+        return 0;
+    }
 
     // Trackbar (slider) class for the mctde Settings overlay-padding sliders.
     { INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES }; InitCommonControlsEx(&icc); }
