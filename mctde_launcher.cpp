@@ -102,6 +102,7 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 #define IDC_DS_FORCEWIN  2030
 #define IDC_DS_ENVSYNC   2031
 #define IDC_DS_FSHZ      2032
+#define IDC_DS_EDITINI   2033
 #define IDC_DS_SAVE      2011
 #define IDC_DS_CANCEL    2012
 #define IDC_DS_REVERT    2013
@@ -131,7 +132,6 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 #define IDC_MC_CORNER     2205
 #define IDC_MC_PADX       2206
 #define IDC_MC_PADY       2207
-#define IDC_MC_SHOWHDR    2208
 #define IDC_MC_SHOWHP     2209
 #define IDC_MC_SHOWPING   2210
 #define IDC_MC_SHOWNAME   2211
@@ -141,6 +141,7 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 #define IDC_MC_HPSIZE     2215
 #define IDC_MC_HPDISP     2216
 #define IDC_MC_CLASSICFONT 2217
+#define IDC_MC_EDITINI    2218
 #define IDC_MC_DYN        2300   // base for the data-driven settings table (2300..)
 
 static HINSTANCE g_inst = nullptr;
@@ -1384,7 +1385,7 @@ struct DsUi {
     HWND hdrFps, unlockFps, lblFpsLimit, fpsLimit, lblFpsThresh, fpsThresh, fpsStab;
     HWND hdrBackup, enBackup, lblBkpInt, bkpInt, lblBkpMax, bkpMax;
     HWND hdrNotReady, forceWin, enVsync, lblFsHz, fsHz;
-    HWND credit, revert, save, cancel;
+    HWND credit, editIni, revert, save, cancel;
 };
 static DsUi U;
 
@@ -1486,7 +1487,9 @@ static void LayoutDsfix(HWND hWnd) {
     const int LX = 16, FX = 178, ROW = 26, HDR = 22;
     int y = 14;
 
-    mv(U.adv, LX, y, 250, 22); y += 30;
+    mv(U.adv, LX, y, 250, 22);
+    mv(U.editIni, DS_CLIENTW - 126, y, 110, 24);   // top-right: open dsfix.ini in the default editor
+    y += 30;
 
     // --- Video ---
     mv(U.hdrVideo, LX, y, 250, 18); y += HDR;
@@ -1691,6 +1694,9 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
             L"DSFix by Durante - GPL-3.0. Source: github.com/PeterTh/dsfix",
             WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 370, 16, hWnd, nullptr, g_inst, nullptr);
         SendMessageW(U.credit, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        U.editIni = CreateWindowW(L"BUTTON", L"Edit dsfix.ini", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+                                 0, 0, 110, 24, hWnd, (HMENU)IDC_DS_EDITINI, g_inst, nullptr);
+        SendMessageW(U.editIni, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
         U.revert = CreateWindowW(L"BUTTON", L"Revert to Defaults", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
                                  0, 0, 130, 28, hWnd, (HMENU)IDC_DS_REVERT, g_inst, nullptr);
         SendMessageW(U.revert, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
@@ -1721,6 +1727,13 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
             } else if (!checked && g_advanced) {
                 g_advanced = false; LayoutDsfix(hWnd);
             }
+            return 0;
+        }
+        if (id == IDC_DS_EDITINI) {
+            // Open dsfix.ini in the user's default text editor. Note: this dialog's Save will
+            // rewrite the keys it manages, so hand-edits land cleanly only after the dialog is
+            // closed with Cancel (or edits to keys the dialog doesn't touch).
+            ShellExecuteW(hWnd, L"open", DsfixIniPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             return 0;
         }
         if (id == IDC_DS_HUDMOD) {
@@ -2008,7 +2021,6 @@ static McDef g_def[] = {
     {1,L"Require launcher to start the game", L"Launcher",L"RequireLauncher",L"1",false,0,0},
     {0,L"Multiplayer overlay",            0,0,0,false,0,0},
     {1,L"Show HP readout",               L"HP",L"Enabled",L"1",false,0,0},
-    {1,L"Show ping (TruePing)",          L"TruePing",L"Enabled",L"1",false,0,0},
     {0,L"Overlay rendering",              0,0,0,false,0,0},
     {4,L"Overlay backend",               L"Render",L"Backend",L"d3d",false,IT_BACKEND,2},
     {2,L"Overlay refresh (ms)",          L"Render",L"SubmitMs",L"66",false,0,0},
@@ -2027,6 +2039,7 @@ static McDef g_def[] = {
     {2,L"1-HP linger (ms)",              L"HP",L"OneHpLingerMs",L"500",true,0,0},
     {2,L"HP poll (ms)",                  L"HP",L"PollMs",L"33",true,0,0},
     {0,L"Ping / TruePing (advanced)",0,0,0,true,0,0},
+    {1,L"Enable true ping measurement",  L"TruePing",L"Enabled",L"1",true,0,0},
     {2,L"Ping display mode",             L"TruePing",L"DisplayMode",L"2",true,0,0},
     {1,L"Prefer overlay ping source",    L"TruePing",L"PreferOverlay",L"1",true,0,0},
     {2,L"Ping channel",                  L"TruePing",L"Channel",L"63",true,0,0},
@@ -2037,7 +2050,8 @@ static McDef g_def[] = {
     {2,L"WebSocket port",                L"WebSocket",L"Port",L"39876",true,0,0},
     {2,L"WebSocket send (ms)",           L"WebSocket",L"SendMs",L"33",true,0,0},
     {0,L"Debug (advanced)",          0,0,0,true,0,0},
-    {1,L"Dump overlay data to log",      L"Debug",L"DumpOverlayData",L"0",true,0,0},
+    // DumpOverlayData (a verbose per-frame data dump that only writes when EnableLogging=1) is a
+    // dev-only diagnostic -- set [Debug] DumpOverlayData=1 by hand via the Edit mctde-link.ini button.
     {1,L"Debug P2P bridge",              L"Debug",L"DebugP2PBridge",L"0",true,0,0},
     {0,L"Controller (advanced)",     0,0,0,true,0,0},
     {1,L"First-launch binding nudge",    L"Controller",L"BindingNudge",L"1",true,0,0},
@@ -2049,9 +2063,9 @@ static McDef g_def[] = {
 static const int MC_NDEF = (int)(sizeof(g_def) / sizeof(g_def[0]));
 
 struct McUi {
-    HWND view, adv, save, cancel;
+    HWND view, adv, save, cancel, editIni;
     HWND hdrOv, classicFont, lblFont, font, lblSize, size, lblHpSize, hpSize, lblCorner, corner, lblPadX, padX, lblPadY, padY;
-    HWND showHeader, lblHpDisp, hpDisp, showPing, showName, forceTop, preview;
+    HWND lblHpDisp, hpDisp, showPing, showName, forceTop, preview;
     HWND ctl[64], lbl[64];      // data-driven table (>= MC_NDEF)
 };
 static McUi M;
@@ -2073,7 +2087,7 @@ static int HpDisplayIndex(bool bars, int barStyle) {
 
 // live preview state, refreshed from the controls by McSync()
 struct McPv { std::wstring font; int size, hpSize, corner, padX, padY; bool hdr, hp, bars, ping, name; int barStyle; };
-static McPv g_pv = { L"Tahoma", 24, 48, 0, 5, 5, true, true, false, true, true, 0 };
+static McPv g_pv = { L"Tahoma", 24, 48, 0, 5, 5, false, true, false, true, true, 0 };
 
 static bool McIsHeader(HWND h) {
     for (int i = 0; i < MC_NDEF; ++i)
@@ -2088,7 +2102,6 @@ static void McSync() {
     g_pv.corner = max(0, (int)SendMessageW(M.corner, CB_GETCURSEL, 0, 0));
     g_pv.padX   = (int)SendMessageW(M.padX, TBM_GETPOS, 0, 0);
     g_pv.padY   = (int)SendMessageW(M.padY, TBM_GETPOS, 0, 0);
-    g_pv.hdr    = CtlChecked(M.showHeader);
     int hd      = max(0, (int)SendMessageW(M.hpDisp, CB_GETCURSEL, 0, 0));
     g_pv.hp     = true;                         // every HP Display mode shows HP in some form
     g_pv.bars   = (hd != 0);                    // 0 = numeric, 1..3 = bar styles
@@ -2302,14 +2315,31 @@ static int McLayout() {
     SetWindowPos(M.hdrOv, nullptr, LX, y - s, 240, 18, SWP_NOZORDER); y += HDRH;
     int ovTop = y;
     P(M.classicFont, LX, y, 260, 22); y += 23;
-    P(M.lblFont,   LX, y + 3, 96, 18); P(M.font,   LX + 60, y, 188, 200); y += ROW;
-    P(M.lblSize,   LX, y + 3, 96, 18); P(M.size,   LX + 60, y, 56, 22);   y += ROW;
-    P(M.lblHpSize, LX, y + 3, 56, 18); P(M.hpSize, LX + 60, y, 188, 26);  y += ROW;
-    P(M.lblCorner, LX, y + 3, 96, 18); P(M.corner, LX + 60, y, 130, 200); y += ROW;
-    P(M.lblPadX,   LX, y + 3, 56, 18); P(M.padX,   LX + 60, y, 188, 26);  y += ROW;
-    P(M.lblPadY,   LX, y + 3, 56, 18); P(M.padY,   LX + 60, y, 188, 26);  y += ROW;
-    P(M.showHeader, LX, y, 240, 22); y += 23;
-    P(M.lblHpDisp,  LX, y + 3, 70, 18); P(M.hpDisp, LX + 60, y, 188, 220); y += ROW;
+    // Control column aligned with the data-driven table below (FX), so the longer labels
+    // ("Screen corner", "HP Display") no longer get overpainted by their control. WIDE caps a
+    // control's width so it still clears the live preview pinned on the right.
+    const int CX = FX, LBLW = CX - LX - 4;
+    const int WIDE = max(120, PVX - CX - 6);
+    // Classic Font uses the baked DS bitmap font at a fixed size, so the system-font picker and
+    // the Font-size / HP-size controls have no effect -- hide all three rows in that mode.
+    // Everything below (corner, padding, HP display, ping, names, topmost) still applies.
+    bool classicFont = CtlChecked(M.classicFont);
+    if (classicFont) {
+        ShowWindow(M.lblFont, SW_HIDE);   ShowWindow(M.font, SW_HIDE);
+        ShowWindow(M.lblSize, SW_HIDE);   ShowWindow(M.size, SW_HIDE);
+        ShowWindow(M.lblHpSize, SW_HIDE); ShowWindow(M.hpSize, SW_HIDE);
+    } else {
+        ShowWindow(M.lblFont, SW_SHOW);   ShowWindow(M.font, SW_SHOW);
+        ShowWindow(M.lblSize, SW_SHOW);   ShowWindow(M.size, SW_SHOW);
+        ShowWindow(M.lblHpSize, SW_SHOW); ShowWindow(M.hpSize, SW_SHOW);
+        P(M.lblFont,   LX, y + 3, LBLW, 18); P(M.font,   CX, y, WIDE, 200); y += ROW;
+        P(M.lblSize,   LX, y + 3, LBLW, 18); P(M.size,   CX, y, 56, 22);    y += ROW;
+        P(M.lblHpSize, LX, y + 3, LBLW, 18); P(M.hpSize, CX, y, WIDE, 26);  y += ROW;
+    }
+    P(M.lblCorner, LX, y + 3, LBLW, 18); P(M.corner, CX, y, 130, 200); y += ROW;
+    P(M.lblPadX,   LX, y + 3, LBLW, 18); P(M.padX,   CX, y, WIDE, 26);  y += ROW;
+    P(M.lblPadY,   LX, y + 3, LBLW, 18); P(M.padY,   CX, y, WIDE, 26);  y += ROW;
+    P(M.lblHpDisp, LX, y + 3, LBLW, 18); P(M.hpDisp, CX, y, WIDE, 220); y += ROW;
     P(M.showPing,   LX, y, 240, 22); y += 23;
     P(M.showName,   LX, y, 240, 22); y += 23;
     P(M.forceTop,   LX, y, 240, 22); y += 23;
@@ -2385,7 +2415,11 @@ static LRESULT CALLBACK McViewProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
     }
     if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
     switch (msg) {
-    case WM_COMMAND:   McSync(); return 0;                         // any change -> refresh preview
+    case WM_COMMAND:
+        // Classic Font toggles the system-font picker's relevance; re-lay out to hide/show that
+        // row (McLayout reads the checkbox), then refresh the preview.
+        if (LOWORD(wParam) == IDC_MC_CLASSICFONT) McRelayout();
+        McSync(); return 0;                                        // any change -> refresh preview
     case WM_HSCROLL:   McSync(); return 0;                         // padding sliders
     case WM_MOUSEWHEEL: McScrollBy(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -48 : 48); return 0;
     case WM_VSCROLL: {
@@ -2428,7 +2462,6 @@ static void McSave() {
     MlSet(L"Overlay", L"Corner",    CtlComboW(M.corner));
     MlSet(L"Overlay", L"PaddingX",  std::to_wstring((int)SendMessageW(M.padX, TBM_GETPOS, 0, 0)));
     MlSet(L"Overlay", L"PaddingY",  std::to_wstring((int)SendMessageW(M.padY, TBM_GETPOS, 0, 0)));
-    MlSet(L"Overlay", L"ShowHeader",CtlChecked(M.showHeader) ? L"1" : L"0");
     // HP Display dropdown -> the three underlying keys. Every mode shows HP, so ShowHp stays 1
     // (hiding the HP column entirely is still done via "Show HP readout" = [HP] Enabled).
     {
@@ -2452,6 +2485,9 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         int bottom = cr.bottom, right = cr.right;
         M.adv = DsMakeCheck(hWnd, IDC_MC_ADV, L"Advanced Options", false);
         SetWindowPos(M.adv, nullptr, 14, 9, 200, 22, SWP_NOZORDER);
+        M.editIni = CreateWindowW(L"BUTTON", L"Edit mctde-link.ini", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+                                  right - 164, 7, 150, 24, hWnd, (HMENU)IDC_MC_EDITINI, g_inst, nullptr);
+        SendMessageW(M.editIni, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
         M.save   = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
                                  right - 164, bottom - 38, 70, 28, hWnd, (HMENU)IDC_MC_SAVE, g_inst, nullptr);
         M.cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
@@ -2471,12 +2507,8 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         M.lblFont   = DsMakeLabel(M.view, L"Font", 0, 0, 96);
         std::vector<std::wstring> fonts = EnumInstalledFonts();
         M.font      = McFontCombo(M.view, IDC_MC_FONT, 188, fonts, MlGetW(L"Overlay", L"FontFace", L"Tahoma"));
-        // Classic Font uses the baked DS bitmap font, so the system-font picker doesn't apply.
-        {
-            bool classic = CtlChecked(M.classicFont);
-            EnableWindow(M.font, !classic);
-            EnableWindow(M.lblFont, !classic);
-        }
+        // Classic Font uses the baked DS bitmap font, so the system-font picker doesn't apply --
+        // McLayout hides the whole Font row while Classic Font is ticked.
         M.lblSize   = DsMakeLabel(M.view, L"Font size", 0, 0, 96);
         M.size      = DsMakeEdit(M.view, IDC_MC_SIZE, NarrowOf(MlGetW(L"Overlay", L"FontHeight", L"24")), 0, 0, 56);
         M.lblHpSize = DsMakeLabel(M.view, L"HP size", 0, 0, 96);
@@ -2489,7 +2521,6 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         M.padX      = McSlider(M.view, IDC_MC_PADX, 0, 400, MlGetInt(L"Overlay", L"PaddingX", 5));
         M.lblPadY   = DsMakeLabel(M.view, L"Padding Y", 0, 0, 56);
         M.padY      = McSlider(M.view, IDC_MC_PADY, 0, 400, MlGetInt(L"Overlay", L"PaddingY", 5));
-        M.showHeader= DsMakeCheck(M.view, IDC_MC_SHOWHDR,  L"Show \"mctde\" header", MlGetInt(L"Overlay", L"ShowHeader", 1) != 0);
         M.lblHpDisp = DsMakeLabel(M.view, L"HP Display", 0, 0, 70);
         {
             std::vector<std::wstring> hpItems(kHpDisplayItems, kHpDisplayItems + kHpDisplayCount);
@@ -2527,12 +2558,12 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_MC_ADV:    g_mcAdv = CtlChecked(M.adv); g_mcScroll = 0; McRelayout(); return 0;
-        case IDC_MC_CLASSICFONT: {
-            bool classic = CtlChecked(M.classicFont);
-            EnableWindow(M.font, !classic);       // grey out the system-font picker in Classic Font mode
-            EnableWindow(M.lblFont, !classic);
+        case IDC_MC_EDITINI:
+            // Open mctde-link.ini in the user's default text editor. Note: Save in this dialog
+            // rewrites the keys it manages, so hand-edits land cleanly only after closing with
+            // Cancel (or edits to keys the dialog doesn't touch).
+            ShellExecuteW(hWnd, L"open", MlPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             return 0;
-        }
         case IDC_MC_SAVE:   McSave(); DestroyWindow(hWnd); return 0;
         case IDC_MC_CANCEL: DestroyWindow(hWnd); return 0;
         }
