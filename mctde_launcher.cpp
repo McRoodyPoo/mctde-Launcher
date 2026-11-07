@@ -43,7 +43,7 @@
 
 // This launcher's own version. Bump on each launcher release and keep latest.txt's
 // mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.5.1";
+static const char* LAUNCHER_VERSION = "0.5.2";
 
 // ------------------------------------------------------------ control IDs
 #define IDC_CHK_PHANTOM  1001

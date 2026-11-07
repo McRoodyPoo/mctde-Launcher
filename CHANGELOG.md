@@ -1,5 +1,14 @@
 # mctde-Launcher Changelog
 
+## v0.5.2: CleanSweep
+
+- Added "Edit ini" buttons that open mctde-link.ini (mctde Settings) and dsfix.ini (DSFix config) in your default editor.
+- Classic Font mode now hides the Font, Font size, and HP size rows, since the baked DS bitmap font ignores them.
+- Removed the "Show mctde header" toggle, which did nothing (the overlay draws no header).
+- Fixed the "Screen corner" label being clipped by its dropdown in mctde Settings (the overlay controls now align with the list below).
+- Removed a duplicate "Show ping" checkbox: the true-ping master switch now lives in the advanced Ping section as "Enable true ping measurement".
+- Removed the dev-only "Dump overlay data to log" checkbox (set [Debug] DumpOverlayData=1 by hand via the new Edit ini button if you need it).
+
 ## v0.5.1: SoFresh
 
 - New install/update defaults: Classic Font, Health Bar (damage), bottom-right, Y-pad 97, logging off.
