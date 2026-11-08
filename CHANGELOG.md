@@ -1,5 +1,14 @@
 # mctde-Launcher Changelog
 
+## v0.5.3: OneStop
+
+- Merged the DSFix config and mctde settings into one "Settings" window with two tabs (DSFix and mctde), sharing a single Save/Cancel bar that writes both inis at once.
+- Replaced the separate "mctde Settings" and DSFix "Config" buttons on the main window with one "Settings" button.
+- The Settings window now sizes to the active tab's content, so a short page no longer leaves dead space above the buttons; taller pages scroll.
+- The scrollbar only shows when a page actually overflows (no greyed-out bar on pages that already fit).
+- Scrolling the mouse wheel over a dropdown or slider no longer changes its value: the wheel scrolls the page instead (a dropdown still takes the wheel while its list is open).
+- Fixed the "Overlay" section header rendering in white instead of the gold accent colour.
+
 ## v0.5.2: CleanSweep
 
 - Added "Edit ini" buttons that open mctde-link.ini (mctde Settings) and dsfix.ini (DSFix config) in your default editor.
