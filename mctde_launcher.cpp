@@ -43,7 +43,12 @@
 
 // This launcher's own version. Bump on each launcher release and keep latest.txt's
 // mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.5.3";
+static const char* LAUNCHER_VERSION = "0.5.4";
+
+// Bump this whenever a release must force-reset mctde-link.ini to the documented defaults (e.g. a
+// changed default like Hide Soul Counter now on). On launch, if the ini's [Launcher] ConfigVersion
+// doesn't match this, the launcher overwrites the whole ini and tells the player it was reset.
+static const wchar_t* INI_CONFIG_VERSION = L"0.5.4";
 
 // ------------------------------------------------------------ control IDs
 #define IDC_CHK_PHANTOM  1001
@@ -436,10 +441,20 @@ EnableLogging=0
 ExitWithGame=1
 
 [Launcher]
+; Config schema tag. The launcher force-resets this whole file to the documented defaults whenever
+; this doesn't match the build's expected tag, then rewrites it. Managed by the launcher; don't edit.
+ConfigVersion=0.5.4
+
 ; 1 = if the game is started WITHOUT mctde_launcher.exe, close the game and open the launcher
 ; instead, so you always go through it. Only enforced when mctde_launcher.exe is present next
 ; to the game; set to 0 to allow launching the game directly.
 RequireLauncher=1
+
+; Auto-Update: 1 = on launch, silently self-update the launcher and mctde-Link to the latest GitHub
+; release when a newer one exists (the launcher relaunches itself after updating); 0 = off. Default
+; is 1; untick "Auto-Update" on the launcher to turn it off. A missing core d3d9.dll is always
+; re-fetched regardless of this setting.
+AutoUpdate=1
 
 [PhantomUnleashed]
 ; Built-in phantom-cap raiser. Rewrite of Metal-Crow's MultiPhantom/Overhaul patch on
@@ -476,8 +491,8 @@ VerifyOnly=0
 ; How it works: a single JZ->JMP byte flip in the F20 soul_param widget, located by a
 ; signature that is unique in the exe -- so it's safe across relocation. It only forces a
 ; code path the game already runs every frame your souls aren't changing.
-; Enabled: 0 = off (default), 1 = on.
-Enabled=0
+; Enabled: 0 = off, 1 = on (default).
+Enabled=1
 ; HideGainPopup: also suppress the transient "+N souls gained" popup that flashes on load-in
 ;   and when you pick up souls. 1 = hide it too (default), 0 = leave it.
 HideGainPopup=1
@@ -486,8 +501,8 @@ HideGainPopup=1
 ;   byte every frame (the soul widget's per-frame update has the dialog object in hand), so the
 ;   dialog draws none of its children. Per-object, so no other HUD element or menu is affected;
 ;   no DSFix and no texture edits. When 1 it supersedes the number/popup hides above (a hidden
-;   dialog draws neither). 0 = keep the box, hide only the number/popup (default); 1 = hide all.
-HideBox=0
+;   dialog draws neither). 0 = keep the box, hide only the number/popup; 1 = hide all (default).
+HideBox=1
 ; HideRegion: the robust way to hide the WHOLE bottom-right soul counter (box + number + popup)
 ;   with no DSFix and no texture edits. Link wraps the D3D9 device; when this is on it drops the
 ;   game's 2D HUD draws (pre-transformed XYZRHW quads) whose every vertex lands in the bottom-
@@ -501,8 +516,8 @@ HideRegion=0
 RegionX=0.78
 RegionY=0.78
 ; SAFETY/DIAGNOSTIC: 1 = only write the self-check to HideSoulCounter.log, never modify the
-;   game (default). Set to 0 (with Enabled=1) to actually hide the number.
-VerifyOnly=1
+;   game. Default is 0 so the enabled hide above actually applies; set to 1 to dry-run it.
+VerifyOnly=0
 
 [Controller]
 ; First-launch controller helper. We run under Steam appid 480 (Spacewar), whose
@@ -654,13 +669,30 @@ StaleMs=4000
 SoFreshDefaults=1
 )INI";
 
-// If mctde-link.ini is missing (e.g. the user deleted it), write the full documented default so
-// it regenerates complete rather than as a bare-bones file. Never touches an existing ini -- the
-// per-key writers and the in-game MigrateIni handle partial/legacy files.
+// Set true when EnsureIniSeeded force-overwrote an EXISTING ini because its ConfigVersion was stale
+// (an upgrade from an older release). Used to tell the player their settings were reset. A fresh
+// seed of a missing ini does not set this -- there were no settings to reset.
+static bool g_iniWasReset = false;
+
+// Seed or reset mctde-link.ini to the full documented default.
+//   * Missing ini (first run, or the user deleted it): write the complete default silently.
+//   * Existing ini whose [Launcher] ConfigVersion != INI_CONFIG_VERSION: this release changed the
+//     baked-in defaults, so overwrite the whole file with the new default and flag g_iniWasReset
+//     so we notify the player. This is a deliberate full reset (covers upgrades from older builds).
+//   * Existing ini already on the current ConfigVersion: left untouched -- the per-key writers and
+//     the in-game MigrateIni handle partial/legacy files from here.
 static void EnsureIniSeeded() {
     const std::wstring ini = PathIn(L"mctde-link.ini");
-    if (!FileExists(ini))
+    if (!FileExists(ini)) {
         WriteFileUtf8(ini, kDefaultIni);
+        return;
+    }
+    wchar_t cv[32] = {0};
+    GetPrivateProfileStringW(L"Launcher", L"ConfigVersion", L"", cv, 32, ini.c_str());
+    if (wcscmp(cv, INI_CONFIG_VERSION) != 0) {
+        WriteFileUtf8(ini, kDefaultIni);
+        g_iniWasReset = true;
+    }
 }
 
 // Trim leading whitespace, return first token (the key) of a config line; "" if comment/blank.
@@ -2047,7 +2079,7 @@ static const wchar_t* IT_MODE[]    = { L"Ask", L"On", L"Off" };
 static const wchar_t* IT_BACKEND[] = { L"d3d", L"gdi" };
 static McDef g_def[] = {
     {0,L"General",                       0,0,0,false,0,0},
-    {1,L"Hide soul counter (entire bottom-right)", L"HideSoulCounter",L"Enabled",L"0",false,0,0},
+    {1,L"Hide soul counter (entire bottom-right)", L"HideSoulCounter",L"Enabled",L"1",false,0,0},
     {1,L"Enable overlay logging",        L"Settings",L"EnableLogging",L"0",false,0,0},
     {1,L"Quit game cleanly on window close", L"Settings",L"ExitWithGame",L"1",false,0,0},
     {1,L"Require launcher to start the game", L"Launcher",L"RequireLauncher",L"1",false,0,0},
@@ -2394,9 +2426,14 @@ static int McLayout() {
         } else if (d.kind == 1) {                // checkbox
             P(M.ctl[i], LX, y, CW - 2 * LX, 22); y += 24;
         } else {                                 // labelled edit/combo
-            P(M.lbl[i], LX, y + 3, FX - LX, 18);
-            if (d.kind == 4) P(M.ctl[i], FX, y, 150, 200);
-            else             P(M.ctl[i], FX, y, 90, 22);
+            // The table's labels (the longest is "Manual nudge key (VK hex)", 131px) run wider than
+            // the overlay group's, and nothing is pinned to their right, so give them their own
+            // wider column than FX and start the field further right. Otherwise the trailing
+            // "(ms)" / "(VK hex)" clips and wraps onto the next row.
+            const int TFX = 160;
+            P(M.lbl[i], LX, y + 3, TFX - LX - 6, 18);
+            if (d.kind == 4) P(M.ctl[i], TFX, y, 150, 200);
+            else             P(M.ctl[i], TFX, y, 90, 22);
             y += ROW;
         }
     }
@@ -2590,10 +2627,15 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
     }
     case WM_SIZE:
         // Keep the scrolling viewport filling the panel below the top toggle bar, then re-fit.
+        // Re-place the top-bar controls too (the resize's background erase can blank them, and
+        // nothing else repaints them) so the "Advanced Options" checkbox doesn't vanish.
         if (M.view) {
             RECT c; GetClientRect(hWnd, &c);
+            SetWindowPos(M.editIni, nullptr, c.right - 164, 7, 150, 24, SWP_NOZORDER);
             SetWindowPos(M.view, nullptr, 0, 38, c.right, max(40, (int)c.bottom - 38), SWP_NOZORDER);
             McRelayout();
+            InvalidateRect(M.adv, nullptr, TRUE);
+            InvalidateRect(M.editIni, nullptr, TRUE);
         }
         return 0;
     case WM_MOUSEWHEEL: McScrollBy(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -48 : 48); return 0;
@@ -2668,7 +2710,8 @@ static void SettingsApplySize() {
     SetWindowPos(panel, nullptr, 0, SET_PANELY, CW, panelH, SWP_NOZORDER);
     SetWindowPos(GetDlgItem(dlg, IDC_SET_SAVE),   nullptr, CW - 164, btnY, 70, 28, SWP_NOZORDER);
     SetWindowPos(GetDlgItem(dlg, IDC_SET_CANCEL), nullptr, CW - 86,  btnY, 70, 28, SWP_NOZORDER);
-    if (g_setTab == 0 && g_setDsAvail) DsfixRelayout(panel);   // scrollbar for the (possibly capped) height
+    if (g_setTab == 0 && g_setDsAvail)      DsfixRelayout(panel);   // scrollbar for the (possibly capped) height
+    else if (g_setTab == 1 && g_setMcAvail) McRelayout();           // same for mctde, even if size didn't change
     InvalidateRect(dlg, nullptr, TRUE);
 }
 
@@ -2756,7 +2799,7 @@ static void OpenSettings(HWND owner, int initialTab) {
     int maxPanelH = SettingsMaxPanelH();
     int Hclient = SET_PANELY + maxPanelH + SET_BTNBAR;   // tallest case; SettingsApplySize trims it
     RECT wr = { 0, 0, SET_CW, Hclient };
-    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
     AdjustWindowRectEx(&wr, style, FALSE, WS_EX_DLGMODALFRAME);
     int winW = wr.right - wr.left, winH = wr.bottom - wr.top;
     RECT rc; GetWindowRect(owner, &rc);
@@ -3034,7 +3077,7 @@ static std::string LinkInstalledVersion() {
 }
 
 static bool AutoUpdateEnabled() {
-    return GetPrivateProfileIntW(L"Launcher", L"AutoUpdate", 0, PathIn(L"mctde-link.ini").c_str()) != 0;
+    return GetPrivateProfileIntW(L"Launcher", L"AutoUpdate", 1, PathIn(L"mctde-link.ini").c_str()) != 0;
 }
 static void SetAutoUpdate(bool on) {
     WritePrivateProfileStringW(L"Launcher", L"AutoUpdate", on ? L"1" : L"0", PathIn(L"mctde-link.ini").c_str());
@@ -3568,6 +3611,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
         sx, sy, ww, wh, nullptr, nullptr, hInst, nullptr);
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
+
+    // One-time heads-up after an upgrade reset the ini to this release's new defaults.
+    if (g_iniWasReset)
+        MessageBoxW(hWnd,
+            L"Your mctde settings have been reset to this release's defaults.\n\n"
+            L"This update ships new mctde-link.ini defaults (Hide Soul Counter is now on by "
+            L"default), so your previous mctde-link.ini was overwritten. Open Settings to redo "
+            L"any customisations.",
+            L"mctde settings reset", MB_OK | MB_ICONINFORMATION);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {

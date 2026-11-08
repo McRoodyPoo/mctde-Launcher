@@ -1,5 +1,13 @@
 # mctde-Launcher Changelog
 
+## v0.5.4: CleanSlate
+
+- Hide Soul Counter is now on by default: the bottom-right soul display is hidden out of the box (box, icon, number, and the "+N" popup). Untick "Hide soul counter" in Settings > mctde to show it again.
+- Auto-Update is now on by default: the launcher keeps itself and mctde-Link up to date on launch. Untick "Auto-Update" on the launcher to turn it off.
+- On first launch this release resets mctde-link.ini to the new documented defaults and tells you it did, so everyone (including people coming from older builds) picks up the new defaults. Your previous mctde-link.ini is replaced, so reopen Settings to redo any customisations.
+- Fixed the "Advanced Options" checkbox in mctde Settings disappearing when you toggled it (it kept working but went invisible).
+- Fixed the longer labels in the mctde advanced settings (Toggle modifier, Ping send interval, Ping stale timeout, WebSocket send, Manual nudge key) getting clipped and wrapping onto the next row.
+
 ## v0.5.3: OneStop
 
 - Merged the DSFix config and mctde settings into one "Settings" window with two tabs (DSFix and mctde), sharing a single Save/Cancel bar that writes both inis at once.
