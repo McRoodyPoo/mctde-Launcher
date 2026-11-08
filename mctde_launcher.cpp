@@ -106,6 +106,11 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 #define IDC_DS_SAVE      2011
 #define IDC_DS_CANCEL    2012
 #define IDC_DS_REVERT    2013
+// Tabbed Settings host (hosts the DSFix + mctde panels under two tabs, with one shared Save bar).
+#define IDC_SET_TAB_DS   2040
+#define IDC_SET_TAB_MC   2041
+#define IDC_SET_SAVE     2042
+#define IDC_SET_CANCEL   2043
 // HUD Mod sub-window
 #define IDC_HUD_EN       2060
 #define IDC_HUD_MIN      2061
@@ -156,7 +161,6 @@ static HBITMAP   g_bgLight = nullptr;    // same, for light mode (pre-letterboxe
 static HWND g_hMain       = nullptr;     // main window, for gating the bg image to it alone
 static HWND g_chkPhantom  = nullptr;
 static HWND g_chkDsfix    = nullptr;
-static HWND g_btnConfig   = nullptr;
 static HWND g_chkPractice = nullptr;
 static HWND g_chkAutoUpdate = nullptr;
 static HWND g_chkDark     = nullptr;
@@ -1236,6 +1240,33 @@ static bool LaunchGame() {
 }
 
 // ------------------------------------------------------------ DSFix config dialog
+
+// Comboboxes and trackbars normally grab the mouse wheel and change their value when the
+// pointer merely hovers over them -- so scrolling the settings page silently edits settings.
+// Subclass them to forward the wheel to the scrolling parent instead; a combobox keeps the
+// wheel only while its list is actually dropped open (so the open list still scrolls).
+static LRESULT CALLBACK NoWheelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    WNDPROC orig = (WNDPROC)GetPropW(h, L"mctdeOrigProc");
+    if (m == WM_MOUSEWHEEL) {
+        wchar_t cls[32] = {0}; GetClassNameW(h, cls, 32);
+        bool combo = (_wcsicmp(cls, L"ComboBox") == 0);
+        if (!combo || !SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0)) {
+            if (HWND p = GetParent(h)) SendMessageW(p, WM_MOUSEWHEEL, w, l);
+            return 0;
+        }
+    }
+    if (m == WM_NCDESTROY) {
+        LRESULT r = CallWindowProcW(orig, h, m, w, l);
+        RemovePropW(h, L"mctdeOrigProc");
+        return r;
+    }
+    return CallWindowProcW(orig, h, m, w, l);
+}
+static void NoWheel(HWND h) {
+    WNDPROC orig = (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)NoWheelProc);
+    SetPropW(h, L"mctdeOrigProc", (HANDLE)orig);
+}
+
 static HWND DsMakeLabel(HWND parent, const wchar_t* text, int x, int y, int w) {
     HWND h = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
                            x, y, w, 18, parent, nullptr, g_inst, nullptr);
@@ -1261,6 +1292,7 @@ static HWND DsMakeCombo(HWND parent, int id, int x, int y, int w,
         if (_wcsicmp(items[i].c_str(), cur.c_str()) == 0) sel = (int)i;
     }
     SendMessageW(h, CB_SETCURSEL, sel, 0);
+    NoWheel(h);
     return h;
 }
 static HWND DsMakeCheck(HWND parent, int id, const wchar_t* text, bool checked) {
@@ -1346,6 +1378,7 @@ static HWND MakeMappedCombo(HWND parent, int id, int w,
         if (values[i] == cur) sel = (int)i;
     }
     SendMessageW(h, CB_SETCURSEL, sel, 0);
+    NoWheel(h);
     return h;
 }
 static std::string MappedValue(HWND h, const std::vector<std::string>& values) {
@@ -1385,11 +1418,13 @@ struct DsUi {
     HWND hdrFps, unlockFps, lblFpsLimit, fpsLimit, lblFpsThresh, fpsThresh, fpsStab;
     HWND hdrBackup, enBackup, lblBkpInt, bkpInt, lblBkpMax, bkpMax;
     HWND hdrNotReady, forceWin, enVsync, lblFsHz, fsHz;
-    HWND credit, editIni, revert, save, cancel;
+    HWND credit, editIni, revert;
 };
 static DsUi U;
 
-static const int DS_CLIENTW = 400;
+// Shared client width for the tabbed Settings window and both of its panels.
+static const int SET_CW = 500;
+static int g_dsScroll = 0;   // DSFix panel scroll offset (its content can exceed the viewport)
 
 // ---------------- HUD Mod sub-window ----------------
 // Everything except the master "Enable HUD Mod" checkbox is greyed out when it's unchecked.
@@ -1478,17 +1513,23 @@ static void OpenHudConfig(HWND owner) {
 }
 
 // ---------------- layout (depends on g_advanced) ----------------
-// position helper (default height suits single-line labels) + visibility helper
-static void mv(HWND h, int x, int y, int w, int ht = 18) { SetWindowPos(h, nullptr, x, y, w, ht, SWP_NOZORDER); }
+// position helper (default height suits single-line labels) + visibility helper.
+// mv() subtracts the panel scroll offset so the whole form scrolls as a unit.
+static void mv(HWND h, int x, int y, int w, int ht = 18) { SetWindowPos(h, nullptr, x, y - g_dsScroll, w, ht, SWP_NOZORDER); }
 static void sh(HWND h, bool v) { ShowWindow(h, v ? SW_SHOW : SW_HIDE); }
 
-static void LayoutDsfix(HWND hWnd) {
+// Lay the DSFix controls out inside the panel's client area and return the total content
+// height (the Settings host uses it to size the vertical scrollbar). No longer resizes any
+// window: the panel is a fixed-size, scrolling child of the tabbed Settings dialog.
+static int DsfixLayout(HWND hWnd) {
     const bool adv = g_advanced;
     const int LX = 16, FX = 178, ROW = 26, HDR = 22;
+    RECT cr; GetClientRect(hWnd, &cr);
+    const int CWp = max(360, (int)cr.right);   // panel client width (excludes the scrollbar)
     int y = 14;
 
     mv(U.adv, LX, y, 250, 22);
-    mv(U.editIni, DS_CLIENTW - 126, y, 110, 24);   // top-right: open dsfix.ini in the default editor
+    mv(U.editIni, CWp - 126, y, 110, 24);   // top-right: open dsfix.ini in the default editor
     y += 30;
 
     // --- Video ---
@@ -1573,19 +1614,42 @@ static void LayoutDsfix(HWND hWnd) {
     }
 
     mv(U.credit, LX, y + 4, 370, 16); y += 26;
-    mv(U.revert, LX, y, 130, 28);
-    mv(U.save, DS_CLIENTW - 164, y, 70, 28); mv(U.cancel, DS_CLIENTW - 86, y, 70, 28); y += 40;
+    mv(U.revert, LX, y, 130, 28); y += 40;
+    return y;
+}
 
-    // resize the window to fit the laid-out content, then nudge it up if the (taller)
-    // advanced layout would run off the bottom of the screen's work area.
-    RECT r = { 0, 0, DS_CLIENTW, y };
-    AdjustWindowRect(&r, (DWORD)GetWindowLongPtrW(hWnd, GWL_STYLE), FALSE);
-    int winW = r.right - r.left, winH = r.bottom - r.top;
-    RECT cur; GetWindowRect(hWnd, &cur);
-    RECT wa = {0}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    int left = cur.left, top = cur.top;
-    if (top + winH > wa.bottom) top = (wa.bottom - winH > wa.top) ? (wa.bottom - winH) : wa.top;
-    SetWindowPos(hWnd, nullptr, left, top, winW, winH, SWP_NOZORDER);
+// Fit the Settings host window to the active tab's content (defined with the host, below). The
+// DSFix panel calls it when a toggle changes its content height so the window grows/shrinks.
+static void SettingsApplySize();
+
+// Re-lay out the DSFix panel and refresh its vertical scrollbar (content height can change
+// when Advanced is toggled or a dinput chain dropdown cascades a new row into view).
+static void DsfixRelayout(HWND panel) {
+    RECT cr; GetClientRect(panel, &cr);
+    int viewH = cr.bottom;
+    int contentH = DsfixLayout(panel);
+    int maxS = max(0, contentH - viewH);
+    if (g_dsScroll > maxS) { g_dsScroll = maxS; DsfixLayout(panel); }
+    SCROLLINFO si = { sizeof(si) }; si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    si.nMin = 0; si.nMax = contentH; si.nPage = viewH; si.nPos = g_dsScroll;
+    SetScrollInfo(panel, SB_VERT, &si, TRUE);
+    ShowScrollBar(panel, SB_VERT, maxS > 0);   // no greyed-out bar when everything fits
+    RedrawWindow(panel, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
+// Scroll by blitting the already-laid-out children (no per-tick re-layout), mirroring the
+// mctde panel's viewport so scrolling stays smooth and trail-free.
+static void DsfixScrollTo(HWND panel, int pos) {
+    SCROLLINFO si = { sizeof(si) }; si.fMask = SIF_RANGE | SIF_PAGE; GetScrollInfo(panel, SB_VERT, &si);
+    int maxS = max(0, (int)si.nMax - (int)si.nPage);
+    pos = max(0, min(pos, maxS));
+    int dy = pos - g_dsScroll;
+    if (dy == 0) return;
+    g_dsScroll = pos;
+    SetScrollPos(panel, SB_VERT, pos, TRUE);
+    ScrollWindowEx(panel, 0, -dy, nullptr, nullptr, nullptr, nullptr,
+                   SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+    UpdateWindow(panel);
 }
 
 static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1595,6 +1659,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_CREATE: {
         g_dsText = ReadFileUtf8(DsfixIniPath());
         g_advanced = false;
+        g_dsScroll = 0;
         auto G = [&](const char* k, const char* d) { return DsfixGet(g_dsText, k, d); };
 
         // HUD values cached for the sub-window + save
@@ -1700,21 +1765,28 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         U.revert = CreateWindowW(L"BUTTON", L"Revert to Defaults", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
                                  0, 0, 130, 28, hWnd, (HMENU)IDC_DS_REVERT, g_inst, nullptr);
         SendMessageW(U.revert, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
-        U.save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
-                               0, 0, 70, 28, hWnd, (HMENU)IDC_DS_SAVE, g_inst, nullptr);
-        U.cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
-                                 0, 0, 70, 28, hWnd, (HMENU)IDC_DS_CANCEL, g_inst, nullptr);
-        SendMessageW(U.save, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
-        SendMessageW(U.cancel, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        // Save / Cancel live on the shared button bar of the tabbed Settings host, not here.
 
-        LayoutDsfix(hWnd);
+        DsfixRelayout(hWnd);
+        return 0;
+    }
+    case WM_MOUSEWHEEL: DsfixScrollTo(hWnd, g_dsScroll + (GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -48 : 48)); return 0;
+    case WM_VSCROLL: {
+        SCROLLINFO si = { sizeof(si) }; si.fMask = SIF_ALL; GetScrollInfo(hWnd, SB_VERT, &si);
+        int pos = si.nPos, page = si.nPage;
+        switch (LOWORD(wParam)) {
+        case SB_LINEUP: pos -= 24; break; case SB_LINEDOWN: pos += 24; break;
+        case SB_PAGEUP: pos -= page; break; case SB_PAGEDOWN: pos += page; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+        }
+        DsfixScrollTo(hWnd, pos);
         return 0;
     }
     case WM_COMMAND: {
         int id = LOWORD(wParam);
         if (HIWORD(wParam) == CBN_SELCHANGE) {
             if (id == IDC_DS_AATYPE) { EnableWindow(U.aaQual, CtlCombo(U.aaType) != "none"); return 0; }
-            if (id >= IDC_DS_DINPUT && id < IDC_DS_DINPUT + 10) { LayoutDsfix(hWnd); return 0; }
+            if (id >= IDC_DS_DINPUT && id < IDC_DS_DINPUT + 10) { SettingsApplySize(); return 0; }
         }
         if (id == IDC_DS_ADV) {
             bool checked = CtlChecked(U.adv);
@@ -1723,9 +1795,9 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
                     L"Experimenting with advanced features could result in unpredictable behavior.",
                     L"Enable Advanced Options", MB_YESNO | MB_ICONWARNING);
                 if (r != IDYES) { SendMessageW(U.adv, BM_SETCHECK, BST_UNCHECKED, 0); return 0; }
-                g_advanced = true; LayoutDsfix(hWnd);
+                g_advanced = true; g_dsScroll = 0; SettingsApplySize();
             } else if (!checked && g_advanced) {
-                g_advanced = false; LayoutDsfix(hWnd);
+                g_advanced = false; g_dsScroll = 0; SettingsApplySize();
             }
             return 0;
         }
@@ -1738,7 +1810,9 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         }
         if (id == IDC_DS_HUDMOD) {
             if (CtlChecked(U.hudMod)) {
-                OpenHudConfig(hWnd);
+                // Own the HUD sub-window with the top-level Settings host so it goes modal over
+                // the whole dialog (this panel is only a child of that host now).
+                OpenHudConfig(GetAncestor(hWnd, GA_ROOT));
                 SendMessageW(U.hudMod, BM_SETCHECK, g_hudEn == "1" ? BST_CHECKED : BST_UNCHECKED, 0);
             } else {
                 g_hudEn = "0";
@@ -1828,10 +1902,21 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
             g_defDofInit = CtlChecked(U.defDof);
             g_fpsStabInit = CtlChecked(U.fpsStab);
             SetAaOptIn(false);               // defaults are AA off
-            LayoutDsfix(hWnd);               // collapse now-"none" chain dropdowns
+            SettingsApplySize();             // collapse now-"none" chain dropdowns; refit the window
             return 0;
         }
-        if (id == IDC_DS_SAVE) {
+        return 0;
+    }
+    case WM_DESTROY: return 0;   // a child panel of the Settings host; nothing to tear down
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+// Write the DSFix controls back to dsfix.ini. Called by the Settings host's shared Save.
+// Preserves the user's existing dsfix.ini: only writes a key when the chosen value actually
+// differs from what was loaded, so untouched settings stay exactly as-is.
+static void DsfixApplySave() {
+    {
             std::string t = g_dsText;
             // Preserve the user's existing dsfix.ini: only write a key when the chosen value
             // actually differs from what was loaded, so untouched settings stay exactly as-is.
@@ -1902,60 +1987,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
             }
 
             WriteFileUtf8(DsfixIniPath(), t);
-            DestroyWindow(hWnd);
-            return 0;
-        }
-        if (id == IDC_DS_CANCEL) { DestroyWindow(hWnd); return 0; }
-        return 0;
     }
-    case WM_CLOSE: DestroyWindow(hWnd); return 0;
-    case WM_DESTROY:
-        // Re-enable the owner. The nested loop in OpenDsfixConfig breaks on !IsWindow(dlg)
-        // right after this dispatch returns -- do NOT PostQuitMessage here, or the stray
-        // WM_QUIT would also tear down the main window's message loop.
-        if (HWND owner = GetWindow(hWnd, GW_OWNER)) { EnableWindow(owner, TRUE); SetActiveWindow(owner); }
-        return 0;
-    }
-    return DefWindowProcW(hWnd, msg, wParam, lParam);
-}
-
-static void OpenDsfixConfig(HWND owner) {
-    if (!FileExists(DsfixIniPath())) {
-        MessageBoxW(owner,
-            L"dsfix.ini was not found next to the launcher.\n"
-            L"Install DSFix into this folder to configure it.",
-            L"DSFix Config", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    static bool registered = false;
-    if (!registered) {
-        WNDCLASSW wc = {0};
-        wc.lpfnWndProc = DsfixWndProc;
-        wc.hInstance = g_inst;
-        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"mctdeDsfixConfig";
-        RegisterClassW(&wc);
-        registered = true;
-    }
-    RECT rc; GetWindowRect(owner, &rc);
-    int x = rc.left + 40, y = rc.top + 10;
-    // height is set by LayoutDsfix in WM_CREATE; start with a placeholder.
-    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"mctdeDsfixConfig", L"DSFix Config",
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        x, y, DS_CLIENTW, 480, owner, nullptr, g_inst, nullptr);
-    EnableWindow(owner, FALSE);
-
-    MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0)) {
-        if (!IsDialogMessageW(dlg, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        if (!IsWindow(dlg)) break;
-    }
-    EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
 }
 
 // ============================================================ mctde Settings dialog
@@ -2090,6 +2122,7 @@ struct McPv { std::wstring font; int size, hpSize, corner, padX, padY; bool hdr,
 static McPv g_pv = { L"Tahoma", 24, 48, 0, 5, 5, false, true, false, true, true, 0 };
 
 static bool McIsHeader(HWND h) {
+    if (h == M.hdrOv) return true;   // the special "Overlay" header isn't in the data-driven table
     for (int i = 0; i < MC_NDEF; ++i)
         if (g_def[i].kind == 0 && M.ctl[i] == h) return true;
     return false;
@@ -2263,6 +2296,7 @@ static HWND McSlider(HWND parent, int id, int minv, int maxv, int val) {
         parent, (HMENU)(INT_PTR)id, g_inst, nullptr);
     SendMessageW(h, TBM_SETRANGE, TRUE, MAKELONG(minv, maxv));
     SendMessageW(h, TBM_SETPOS, TRUE, val);
+    NoWheel(h);
     return h;
 }
 
@@ -2280,6 +2314,7 @@ static HWND McFontCombo(HWND parent, int id, int w, const std::vector<std::wstri
         if (_wcsicmp(items[i].c_str(), cur.c_str()) == 0) sel = (int)i;
     }
     SendMessageW(h, CB_SETCURSEL, sel, 0);
+    NoWheel(h);
     return h;
 }
 // Draw one owner-drawn font-combo item in that font's own typeface.
@@ -2377,8 +2412,12 @@ static void McRelayout() {
     SCROLLINFO si = { sizeof(si) }; si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
     si.nMin = 0; si.nMax = contentH; si.nPage = viewH; si.nPos = g_mcScroll;
     SetScrollInfo(M.view, SB_VERT, &si, TRUE);
+    ShowScrollBar(M.view, SB_VERT, maxS > 0);   // no greyed-out bar when everything fits
     RedrawWindow(M.view, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
+
+// mctde content height (the scrolling viewport's full height), for sizing the host window.
+static int McContentHeight() { return McLayout(); }
 
 // Scroll by shifting the already-laid-out children with ScrollWindowEx -- it blits the
 // retained area and invalidates only the newly exposed strip, so there are no repaint trails.
@@ -2488,17 +2527,12 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         M.editIni = CreateWindowW(L"BUTTON", L"Edit mctde-link.ini", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
                                   right - 164, 7, 150, 24, hWnd, (HMENU)IDC_MC_EDITINI, g_inst, nullptr);
         SendMessageW(M.editIni, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
-        M.save   = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
-                                 right - 164, bottom - 38, 70, 28, hWnd, (HMENU)IDC_MC_SAVE, g_inst, nullptr);
-        M.cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
-                                 right - 86, bottom - 38, 70, 28, hWnd, (HMENU)IDC_MC_CANCEL, g_inst, nullptr);
-        SendMessageW(M.save, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
-        SendMessageW(M.cancel, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        // Save / Cancel live on the shared button bar of the tabbed Settings host, not here.
 
-        // scrolling viewport between the top toggle and the bottom button bar
+        // scrolling viewport from below the top toggle down to the panel's bottom edge
         M.view = CreateWindowExW(0, L"mctdeSetView", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
-            0, 38, right, bottom - 38 - 46, hWnd, nullptr, g_inst, nullptr);
+            0, 38, right, bottom - 38, hWnd, nullptr, g_inst, nullptr);
 
         // --- special Overlay widgets (children of the viewport) ---
         M.hdrOv     = DsMakeLabel(M.view, L"Overlay", 0, 0, 240);
@@ -2554,18 +2588,138 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         McRelayout();
         return 0;
     }
+    case WM_SIZE:
+        // Keep the scrolling viewport filling the panel below the top toggle bar, then re-fit.
+        if (M.view) {
+            RECT c; GetClientRect(hWnd, &c);
+            SetWindowPos(M.view, nullptr, 0, 38, c.right, max(40, (int)c.bottom - 38), SWP_NOZORDER);
+            McRelayout();
+        }
+        return 0;
     case WM_MOUSEWHEEL: McScrollBy(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -48 : 48); return 0;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
-        case IDC_MC_ADV:    g_mcAdv = CtlChecked(M.adv); g_mcScroll = 0; McRelayout(); return 0;
+        case IDC_MC_ADV:    g_mcAdv = CtlChecked(M.adv); g_mcScroll = 0; SettingsApplySize(); return 0;
         case IDC_MC_EDITINI:
             // Open mctde-link.ini in the user's default text editor. Note: Save in this dialog
             // rewrites the keys it manages, so hand-edits land cleanly only after closing with
             // Cancel (or edits to keys the dialog doesn't touch).
             ShellExecuteW(hWnd, L"open", MlPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             return 0;
-        case IDC_MC_SAVE:   McSave(); DestroyWindow(hWnd); return 0;
-        case IDC_MC_CANCEL: DestroyWindow(hWnd); return 0;
+        }
+        return 0;
+    case WM_DESTROY: return 0;   // a child panel of the Settings host; nothing to tear down
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+// ============================================================ tabbed Settings host
+// One window with two tabs -- "DSFix" and "mctde" -- that hosts the DSFix and mctde config
+// panels (each a scrolling child) and a single shared Save / Cancel bar. Save writes both
+// inis (whichever panels are present); Cancel discards everything.
+static HWND g_setTabDs = nullptr, g_setTabMc = nullptr;
+static HWND g_setDsPanel = nullptr, g_setMcPanel = nullptr;  // tab bodies (real panels or placeholders)
+static bool g_setDsAvail = false;                            // dsfix.ini present -> DSFix panel is a real editor
+static bool g_setMcAvail = false;                            // mctde-link.ini present -> mctde panel is real
+static int  g_setTab = 0;                                    // 0 = DSFix, 1 = mctde
+
+// Shared layout metrics for the host: tab strip, then the panel, then the Save/Cancel bar.
+static const int SET_PANELY = 42, SET_BTNBAR = 44, SET_TOPCAP = 680;
+
+// Available panel height for a tab at this screen size (the mctde panel and a scrolling
+// DSFix panel use the full amount; a short DSFix basic view uses only what it needs).
+static int SettingsMaxPanelH() {
+    RECT wa = {0}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int maxClientH = min(SET_TOPCAP, (int)(wa.bottom - wa.top - 40));
+    return max(160, maxClientH - SET_PANELY - SET_BTNBAR);
+}
+
+// Fit the host window (and the active panel + button bar) to the active tab's content, so a
+// short page like DSFix-basic doesn't leave a big empty gap above Save/Cancel.
+static void SettingsApplySize() {
+    if (!g_setTabDs) return;
+    HWND dlg = GetParent(g_setTabDs);
+    if (!dlg) return;
+    RECT wa = {0}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int maxPanelH = SettingsMaxPanelH();
+    HWND panel = (g_setTab == 0 ? g_setDsPanel : g_setMcPanel);
+    int panelH;
+    if (g_setTab == 0 && g_setDsAvail) {
+        int contentH = DsfixLayout(panel);                 // fit DSFix to its content...
+        panelH = max(160, min(contentH + 2, maxPanelH));    // ...but cap + scroll if it's tall
+    } else if (g_setTab == 1 && g_setMcAvail) {
+        int contentH = McContentHeight() + 38;             // + the top toggle bar above the viewport
+        panelH = max(160, min(contentH + 2, maxPanelH));    // fit mctde too; scroll only when tall
+    } else {
+        panelH = 180;                                       // a "not found" placeholder
+    }
+    int clientH = SET_PANELY + panelH + SET_BTNBAR;
+    RECT wr = { 0, 0, SET_CW, clientH };
+    DWORD style = (DWORD)GetWindowLongPtrW(dlg, GWL_STYLE);
+    DWORD ex    = (DWORD)GetWindowLongPtrW(dlg, GWL_EXSTYLE);
+    AdjustWindowRectEx(&wr, style, FALSE, ex);
+    int winW = wr.right - wr.left, winH = wr.bottom - wr.top;
+    RECT cur; GetWindowRect(dlg, &cur);
+    int left = cur.left, top = cur.top;
+    if (top + winH > wa.bottom) top = max((LONG)wa.top, wa.bottom - winH);
+    SetWindowPos(dlg, nullptr, left, top, winW, winH, SWP_NOZORDER);
+    RECT cc; GetClientRect(dlg, &cc);
+    int CW = cc.right, CH = cc.bottom, btnY = CH - 36;
+    SetWindowPos(panel, nullptr, 0, SET_PANELY, CW, panelH, SWP_NOZORDER);
+    SetWindowPos(GetDlgItem(dlg, IDC_SET_SAVE),   nullptr, CW - 164, btnY, 70, 28, SWP_NOZORDER);
+    SetWindowPos(GetDlgItem(dlg, IDC_SET_CANCEL), nullptr, CW - 86,  btnY, 70, 28, SWP_NOZORDER);
+    if (g_setTab == 0 && g_setDsAvail) DsfixRelayout(panel);   // scrollbar for the (possibly capped) height
+    InvalidateRect(dlg, nullptr, TRUE);
+}
+
+static void SettingsSelectTab(int tab) {
+    g_setTab = tab;
+    ShowWindow(g_setDsPanel, tab == 0 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_setMcPanel, tab == 1 ? SW_SHOW : SW_HIDE);
+    SettingsApplySize();                         // refit the window to this tab's content
+    InvalidateRect(g_setTabDs, nullptr, TRUE);   // repaint the strip so active/inactive styling updates
+    InvalidateRect(g_setTabMc, nullptr, TRUE);
+    SetFocus(tab == 0 ? g_setDsPanel : g_setMcPanel);
+}
+
+// A tab button: the active one gets the field fill + a 2px accent border; the rest look like
+// a normal themed button. (Intercepted before ThemeHandle's generic button drawer.)
+static void SettingsDrawTab(LPDRAWITEMSTRUCT d, bool active) {
+    RECT r = d->rcItem;
+    HBRUSH b = CreateSolidBrush(active ? ThField() : ThBtn()); FillRect(d->hDC, &r, b); DeleteObject(b);
+    HPEN pen = CreatePen(PS_SOLID, active ? 2 : 1, active ? ThAccent() : ThBorder());
+    HGDIOBJ op = SelectObject(d->hDC, pen), ob = SelectObject(d->hDC, GetStockObject(NULL_BRUSH));
+    Rectangle(d->hDC, r.left, r.top, r.right, r.bottom);
+    SelectObject(d->hDC, op); SelectObject(d->hDC, ob); DeleteObject(pen);
+    wchar_t txt[64] = {0}; GetWindowTextW(d->hwndItem, txt, 64);
+    SetBkMode(d->hDC, TRANSPARENT);
+    SetTextColor(d->hDC, active ? ThAccent() : ThText());
+    HFONT of = (HFONT)SelectObject(d->hDC, g_uiFont);
+    DrawTextW(d->hDC, txt, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(d->hDC, of);
+}
+
+static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LRESULT _tr = 0;
+    if (msg == WM_DRAWITEM) {
+        LPDRAWITEMSTRUCT d = (LPDRAWITEMSTRUCT)lParam;
+        if (d->CtlType == ODT_BUTTON && (d->CtlID == IDC_SET_TAB_DS || d->CtlID == IDC_SET_TAB_MC)) {
+            SettingsDrawTab(d, d->CtlID == (UINT)(g_setTab == 0 ? IDC_SET_TAB_DS : IDC_SET_TAB_MC));
+            return TRUE;
+        }
+    }
+    if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
+    switch (msg) {
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_SET_TAB_DS: SettingsSelectTab(0); return 0;
+        case IDC_SET_TAB_MC: SettingsSelectTab(1); return 0;
+        case IDC_SET_SAVE:
+            if (g_setDsAvail) DsfixApplySave();   // write dsfix.ini from the DSFix panel
+            if (g_setMcAvail) McSave();           // write mctde-link.ini from the mctde panel
+            DestroyWindow(hWnd);
+            return 0;
+        case IDC_SET_CANCEL: DestroyWindow(hWnd); return 0;
         }
         return 0;
     case WM_CLOSE: DestroyWindow(hWnd); return 0;
@@ -2576,10 +2730,13 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-static void OpenMctdeSettings(HWND owner) {
-    if (!FileExists(MlPath())) {
-        MessageBoxW(owner, L"mctde-link.ini was not found next to the launcher.",
-                    L"mctde Settings", MB_OK | MB_ICONWARNING);
+// initialTab: 0 = DSFix, 1 = mctde (auto-corrected if that tab's ini is missing).
+static void OpenSettings(HWND owner, int initialTab) {
+    bool dsAvail = FileExists(DsfixIniPath());
+    bool mcAvail = FileExists(MlPath());
+    if (!dsAvail && !mcAvail) {
+        MessageBoxW(owner, L"Neither mctde-link.ini nor dsfix.ini was found next to the launcher.",
+                    L"Settings", MB_OK | MB_ICONWARNING);
         return;
     }
     static bool registered = false;
@@ -2587,26 +2744,88 @@ static void OpenMctdeSettings(HWND owner) {
         WNDCLASSW wc = {0};
         wc.hInstance = g_inst; wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpfnWndProc = McDialogProc;  wc.lpszClassName = L"mctdeSettings";    RegisterClassW(&wc);
-        wc.lpfnWndProc = McViewProc;    wc.lpszClassName = L"mctdeSetView";     RegisterClassW(&wc);
-        wc.lpfnWndProc = McPreviewProc; wc.lpszClassName = L"mctdePreview";     RegisterClassW(&wc);
+        wc.lpfnWndProc = SettingsWndProc; wc.lpszClassName = L"mctdeSettingsHost"; RegisterClassW(&wc);
+        wc.lpfnWndProc = DsfixWndProc;    wc.lpszClassName = L"mctdeDsfixConfig";  RegisterClassW(&wc);
+        wc.lpfnWndProc = McDialogProc;    wc.lpszClassName = L"mctdeSettings";     RegisterClassW(&wc);
+        wc.lpfnWndProc = McViewProc;      wc.lpszClassName = L"mctdeSetView";      RegisterClassW(&wc);
+        wc.lpfnWndProc = McPreviewProc;   wc.lpszClassName = L"mctdePreview";      RegisterClassW(&wc);
         registered = true;
     }
-    RECT rc; GetWindowRect(owner, &rc);
+
     RECT wa = {0}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    int H = min(660, wa.bottom - wa.top - 40);
-    int x = rc.left + 30, yTop = rc.top + 10;
-    if (yTop + H > wa.bottom) yTop = max((LONG)wa.top, wa.bottom - H);
-    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"mctdeSettings", L"mctde Settings",
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, x, yTop, MC_CLIENTW, H, owner, nullptr, g_inst, nullptr);
+    int maxPanelH = SettingsMaxPanelH();
+    int Hclient = SET_PANELY + maxPanelH + SET_BTNBAR;   // tallest case; SettingsApplySize trims it
+    RECT wr = { 0, 0, SET_CW, Hclient };
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    AdjustWindowRectEx(&wr, style, FALSE, WS_EX_DLGMODALFRAME);
+    int winW = wr.right - wr.left, winH = wr.bottom - wr.top;
+    RECT rc; GetWindowRect(owner, &rc);
+    int x = rc.left + 30, y = rc.top + 10;
+    if (y + winH > wa.bottom) y = max((LONG)wa.top, wa.bottom - winH);
+    if (x + winW > wa.right)  x = max((LONG)wa.left, wa.right - winW);
+
+    // Created hidden; shown only after SettingsApplySize has trimmed it to the active tab.
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"mctdeSettingsHost", L"Settings",
+        style, x, y, winW, winH, owner, nullptr, g_inst, nullptr);
+
+    RECT cc; GetClientRect(dlg, &cc);
+    int CW = cc.right, CH = cc.bottom;
+    const int TABH = 28, TABW = 96, TABX = 12, TABGAP = 2, TABY = SET_PANELY - TABH - 6;
+    int btnY = CH - 36;
+
+    g_setTabDs = CreateWindowW(L"BUTTON", L"DSFix", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        TABX, TABY, TABW, TABH, dlg, (HMENU)IDC_SET_TAB_DS, g_inst, nullptr);
+    g_setTabMc = CreateWindowW(L"BUTTON", L"mctde", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        TABX + TABW + TABGAP, TABY, TABW, TABH, dlg, (HMENU)IDC_SET_TAB_MC, g_inst, nullptr);
+    HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
+        CW - 164, btnY, 70, 28, dlg, (HMENU)IDC_SET_SAVE, g_inst, nullptr);
+    HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+        CW - 86, btnY, 70, 28, dlg, (HMENU)IDC_SET_CANCEL, g_inst, nullptr);
+    for (HWND h : { g_setTabDs, g_setTabMc, save, cancel }) SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+
+    // Both panels are built at the full viewport height; SettingsApplySize sizes the window to
+    // whichever tab is showing (DSFix basic stays short; mctde and tall DSFix pages scroll).
+    g_setMcAvail = mcAvail;
+    if (mcAvail) {
+        g_setMcPanel = CreateWindowExW(0, L"mctdeSettings", L"", WS_CHILD | WS_CLIPCHILDREN,
+            0, SET_PANELY, CW, maxPanelH, dlg, nullptr, g_inst, nullptr);
+    } else {
+        g_setMcPanel = CreateWindowW(L"STATIC", L"mctde-link.ini was not found next to the launcher.",
+            WS_CHILD | SS_CENTER, 20, SET_PANELY + 40, CW - 40, 40, dlg, nullptr, g_inst, nullptr);
+        SendMessageW(g_setMcPanel, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+    }
+    // DSFix tab body (DSFix is user-installed, so dsfix.ini may be absent)
+    g_setDsAvail = dsAvail;
+    if (dsAvail) {
+        g_setDsPanel = CreateWindowExW(0, L"mctdeDsfixConfig", L"", WS_CHILD | WS_VSCROLL | WS_CLIPCHILDREN,
+            0, SET_PANELY, CW, maxPanelH, dlg, nullptr, g_inst, nullptr);
+    } else {
+        g_setDsPanel = CreateWindowW(L"STATIC",
+            L"dsfix.ini was not found next to the launcher.\r\nInstall DSFix into this folder to configure it.",
+            WS_CHILD | SS_CENTER, 20, SET_PANELY + 40, CW - 40, 60, dlg, nullptr, g_inst, nullptr);
+        SendMessageW(g_setDsPanel, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+    }
+
+    if (!dsAvail && initialTab == 0) initialTab = 1;   // don't open on an empty DSFix tab
+    if (!mcAvail && initialTab == 1) initialTab = 0;
+    SettingsSelectTab(initialTab);                     // fits + positions everything
+    ShowWindow(dlg, SW_SHOWNORMAL);
+    SetForegroundWindow(dlg);
+
     EnableWindow(owner, FALSE);
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
-        if (!IsDialogMessageW(dlg, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+        HWND panel = (g_setTab == 0 ? g_setDsPanel : g_setMcPanel);
+        // Give the active panel first crack at dialog keys (Tab/arrows within its fields), then
+        // the host (tab strip + Save/Cancel), before falling back to normal dispatch.
+        if (!(panel && IsDialogMessageW(panel, &msg)) && !IsDialogMessageW(dlg, &msg)) {
+            TranslateMessage(&msg); DispatchMessageW(&msg);
+        }
         if (!IsWindow(dlg)) break;
     }
     EnableWindow(owner, TRUE);
     SetForegroundWindow(owner);
+    g_setTabDs = g_setTabMc = g_setDsPanel = g_setMcPanel = nullptr;
 }
 
 // ------------------------------------------------------------ main window
@@ -3096,10 +3315,10 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
     switch (msg) {
     case WM_CREATE: {
         g_hMain = hWnd;
-        // "mctde Settings" button -- opens the mctde-link.ini panel (overlay placement/font/preview,
-        // Hide Soul Counter, and the rest of mctde-Link's config). Sits in the bottom button row,
-        // between Changelog (x 16..116) and Exit (x 300..380).
-        HWND btnMctde = CreateWindowW(L"BUTTON", L"mctde Settings",
+        // "Settings" button -- opens the tabbed Settings window (a DSFix tab for dsfix.ini and an
+        // mctde tab for mctde-link.ini: overlay placement/font/preview, Hide Soul Counter, etc.).
+        // Sits in the bottom button row, between Changelog (x 16..116) and Exit (x 300..380).
+        HWND btnMctde = CreateWindowW(L"BUTTON", L"Settings",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 130, 300, 150, 30,
             hWnd, (HMENU)IDC_BTN_MCTDE, g_inst, nullptr);
         // Widths are sized to the text so the controls' opaque background doesn't paint over
@@ -3110,13 +3329,11 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         g_chkPractice = CreateWindowW(L"BUTTON", L"Eloise's PTDE Practice Tool",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 160, 200, 22,
             hWnd, (HMENU)IDC_CHK_PRACTICE, g_inst, nullptr);
-        // DSFix + Config sit at the bottom of the list.
+        // DSFix enable checkbox. (Its config now lives on the DSFix tab of the Settings window,
+        // so there's no separate "Config" button here anymore.)
         g_chkDsfix = CreateWindowW(L"BUTTON", L"DSFix",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 200, 64, 22,
             hWnd, (HMENU)IDC_CHK_DSFIX, g_inst, nullptr);
-        g_btnConfig = CreateWindowW(L"BUTTON", L"Config",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 84, 198, 72, 26,
-            hWnd, (HMENU)IDC_BTN_CONFIG, g_inst, nullptr);
         // Auto-Launch DSCM (Dark Souls Connectivity Mod). Greyed as "Searching for DSCM..."
         // until DSCM.exe is found in the DATA folder (or copied in from a running instance).
         g_chkDscm = CreateWindowW(L"BUTTON", L"Searching for DSCM...",
@@ -3148,7 +3365,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW, 404, 296, 100, 40,
             hWnd, (HMENU)IDC_BTN_PLAY, g_inst, nullptr);
 
-        for (HWND h : { btnMctde, g_chkPhantom, g_chkDsfix, g_btnConfig, g_chkPractice, g_chkDscm,
+        for (HWND h : { btnMctde, g_chkPhantom, g_chkDsfix, g_chkPractice, g_chkDscm,
                         g_chkAutoUpdate, g_chkDark, g_lblVersion, g_lblClock, chlog, exit, play })
             SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
 
@@ -3168,7 +3385,6 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             // (The launcher is standalone and never ships DSFix; the user installs it separately.)
             SendMessageW(g_chkDsfix, BM_SETCHECK, BST_UNCHECKED, 0);
             EnableWindow(g_chkDsfix, FALSE);
-            EnableWindow(g_btnConfig, FALSE);
         }
         if (PracticeInstalled()) {
             // Reflect real state; unchecked by default because the tool ships parked (.off).
@@ -3236,8 +3452,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         if (BgActive(hWnd) && lParam && HIWORD(wParam) == BN_CLICKED)
             RepaintOverBg((HWND)lParam);
         switch (LOWORD(wParam)) {
-        case IDC_BTN_CONFIG:    OpenDsfixConfig(hWnd); return 0;
-        case IDC_BTN_MCTDE:     OpenMctdeSettings(hWnd); return 0;
+        case IDC_BTN_MCTDE:     OpenSettings(hWnd, 0); return 0;
         case IDC_BTN_CHANGELOG: OpenChangelog(hWnd);   return 0;
         case IDC_BTN_PLAY:      ApplyAnd(hWnd, true);  return 0;
         case IDC_BTN_EXIT:      ApplyAnd(hWnd, false); return 0;
