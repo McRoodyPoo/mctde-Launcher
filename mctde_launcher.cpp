@@ -29,6 +29,8 @@
 #include <cstring>
 #include <unordered_set>
 #include <commctrl.h>
+#include <objidl.h>
+#include <gdiplus.h>
 #include "resource.h"
 
 #pragma comment(lib, "user32.lib")
@@ -37,6 +39,7 @@
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "version.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "gdiplus.lib")
 
 #define WM_CHANGELOG_READY (WM_APP + 1)
 #define WM_VERSIONS_READY  (WM_APP + 2)
@@ -70,6 +73,10 @@ static const wchar_t* INI_CONFIG_VERSION = L"0.5.4";
 #define IDT_DSCM_FRONT 2
 // Ticks once a second to refresh the top-left date/time readout.
 #define IDT_CLOCK 3
+// Polls the gamepad (XInput) ~30x/sec to drive UI navigation with a controller.
+#define IDT_XINPUT 4
+// Ticks once a second for the Auto-Play countdown before auto-launching the game.
+#define IDT_AUTOPLAY 5
 
 // Where the greyed-out practice-tool row links when the tool isn't bundled.
 // Eloise's PTDE Practice Tool (tasrunner branch).
@@ -132,6 +139,7 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 // corner empty. Code-only (no DSFix HUD Mod, no texture edits); reversible on game close.
 #define IDC_DS_HIDESOUL   2070
 
+#define IDC_CHK_AUTOPLAY  1013
 // Main-window "mctde Settings" button + its dialog.
 #define IDC_BTN_MCTDE     1012
 #define IDC_MC_ADV        2200
@@ -157,6 +165,7 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 static HINSTANCE g_inst = nullptr;
 static HFONT     g_uiFont = nullptr;     // standard control font
 static HFONT     g_titleFont = nullptr;  // "Dark Souls"
+static HFONT     g_hdrFont   = nullptr;  // semibold accent section headers
 static HFONT     g_subFont = nullptr;    // "Prepare To Die Edition"
 static HFONT     g_mctdeFont = nullptr;  // "mctde"
 static HBITMAP   g_artorias = nullptr;   // trimmed white-on-black silhouette, drawn themed
@@ -179,6 +188,12 @@ static std::string g_latestLink, g_latestLauncher;  // filled by the update thre
 static HWND g_lnkPractice = nullptr;   // shown instead of a label when the tool isn't bundled
 static HFONT g_linkFont   = nullptr;   // underlined font for the link
 static WNDPROC g_origStaticProc = nullptr;
+static HWND g_btnPlay     = nullptr;     // PLAY button, so the Auto-Play countdown can retitle it
+static HWND g_chkAutoPlay = nullptr;
+static bool g_autoActive  = false;       // Auto-Play countdown is running
+static int  g_autoCount   = 0;           // seconds left on the countdown
+static bool g_xiConnected = false;       // a gamepad is on port 0 (drives the on-button A glyph)
+static int  g_glyphStyle  = 0;           // controller icon set: 0 Xbox, 1 PlayStation, 2 Switch
 
 // Subclass for the link static: show a hand cursor on hover; everything else is default.
 static LRESULT CALLBACK LinkProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -206,12 +221,52 @@ static bool FileExists(const std::wstring& p) {
 static bool   g_dark = false;
 static HBRUSH g_brBg = nullptr, g_brField = nullptr;
 
-static COLORREF ThBg()     { return g_dark ? RGB(30, 30, 30)    : GetSysColor(COLOR_BTNFACE); }
-static COLORREF ThText()   { return g_dark ? RGB(225, 225, 225) : RGB(0, 0, 0); }
+static COLORREF ThBg()     { return g_dark ? RGB(30, 30, 30)    : RGB(245, 246, 249); }
+static COLORREF ThText()   { return g_dark ? RGB(225, 225, 225) : RGB(32, 34, 40); }
 static COLORREF ThField()  { return g_dark ? RGB(45, 45, 48)    : RGB(255, 255, 255); }
-static COLORREF ThBtn()    { return g_dark ? RGB(55, 55, 58)    : RGB(225, 225, 228); }
-static COLORREF ThBorder() { return g_dark ? RGB(95, 95, 100)   : RGB(120, 120, 120); }
-static COLORREF ThAccent() { return g_dark ? RGB(205, 175, 95)  : RGB(150, 110, 30); }
+static COLORREF ThBtn()    { return g_dark ? RGB(55, 55, 58)    : RGB(236, 238, 242); }
+static COLORREF ThBorder() { return g_dark ? RGB(95, 95, 100)   : RGB(205, 209, 217); }
+static COLORREF ThAccent() { return g_dark ? RGB(205, 175, 95)  : RGB(178, 134, 48); }
+
+// ---- GDI+ helpers: smooth, anti-aliased shapes for the custom controls ----
+static ULONG_PTR g_gdiplusToken = 0;
+static Gdiplus::Color GpC(COLORREF c, BYTE a = 255) {
+    return Gdiplus::Color(a, GetRValue(c), GetGValue(c), GetBValue(c));
+}
+static void GpRoundPath(Gdiplus::GraphicsPath& p, float x, float y, float w, float h, float rad) {
+    float d = rad * 2; if (d > w) d = w; if (d > h) d = h;
+    p.Reset();
+    p.AddArc(x, y, d, d, 180, 90);
+    p.AddArc(x + w - d, y, d, d, 270, 90);
+    p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+    p.AddArc(x, y + h - d, d, d, 90, 90);
+    p.CloseFigure();
+}
+static void GpFillRound(Gdiplus::Graphics& g, float x, float y, float w, float h, float rad, Gdiplus::Color fill) {
+    Gdiplus::GraphicsPath p; GpRoundPath(p, x, y, w, h, rad);
+    Gdiplus::SolidBrush b(fill); g.FillPath(&b, &p);
+}
+static void GpStrokeRound(Gdiplus::Graphics& g, float x, float y, float w, float h, float rad, Gdiplus::Color col, float pw) {
+    Gdiplus::GraphicsPath p; GpRoundPath(p, x + pw / 2, y + pw / 2, w - pw, h - pw, rad);
+    Gdiplus::Pen pen(col, pw); g.DrawPath(&pen, &p);
+}
+// Vertical-gradient fill of a rounded rect (the "glass"/depth look). The brush rect is grown 1px
+// top and bottom so the gradient never leaves a hard wrap line at the exact top/bottom edge.
+static void GpFillRoundVGrad(Gdiplus::Graphics& g, float x, float y, float w, float h, float rad,
+                             Gdiplus::Color top, Gdiplus::Color bot) {
+    Gdiplus::GraphicsPath p; GpRoundPath(p, x, y, w, h, rad);
+    Gdiplus::LinearGradientBrush br(Gdiplus::RectF(x, y - 1.0f, w, h + 2.0f), top, bot,
+                                    Gdiplus::LinearGradientModeVertical);
+    g.FillPath(&br, &p);
+}
+static COLORREF Lighten(COLORREF c, int d) {
+    int r = GetRValue(c) + d, g = GetGValue(c) + d, b = GetBValue(c) + d;
+    return RGB(r > 255 ? 255 : r, g > 255 ? 255 : g, b > 255 ? 255 : b);
+}
+static COLORREF Darken(COLORREF c, int d) {
+    int r = GetRValue(c) - d, g = GetGValue(c) - d, b = GetBValue(c) - d;
+    return RGB(r < 0 ? 0 : r, g < 0 ? 0 : g, b < 0 ? 0 : b);
+}
 
 static bool DarkModeEnabled() {
     return GetPrivateProfileIntW(L"Launcher", L"DarkMode", 0, PathIn(L"mctde-link.ini").c_str()) != 0;
@@ -228,26 +283,102 @@ static void ApplyTheme() {
 
 // Flat owner-drawn button (drawn in both themes -- the only portable way to get dark buttons
 // without the Win10 dark-control APIs, which don't exist under Wine/Proton).
+// Draw the controller "confirm" badge (filled circle + glyph) into rect bg, using the chosen icon
+// set. Xbox = green A, PlayStation = blue cross, Switch = dark A. The physical button is always the
+// XInput confirm button; the set just changes which icon we show (see Steam Input note).
+static void DrawGlyphInto(HDC dc, RECT bg) {
+    float x = (float)bg.left, y = (float)bg.top;
+    float w = (float)(bg.right - bg.left), h = (float)(bg.bottom - bg.top);
+    COLORREF top, bot;                 // the confirm button is always A/cross; the set picks the look
+    switch (g_glyphStyle) {
+        case 1: top = RGB(96, 138, 222); bot = RGB(44, 82, 168);  break;  // PlayStation blue (cross)
+        case 2: top = RGB(74, 80, 92);   bot = RGB(34, 38, 48);   break;  // Switch dark grey (A)
+        default:top = RGB(86, 190, 98);  bot = RGB(34, 122, 52);  break;  // Xbox green (A)
+    }
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    // Disc: vertical gradient body, a soft outer rim and a bright top arc so it reads as a 3D button.
+    Gdiplus::GraphicsPath disc; disc.AddEllipse(x, y, w - 1, h - 1);
+    Gdiplus::LinearGradientBrush body(Gdiplus::RectF(x, y - 1, w, h + 2), GpC(top), GpC(bot),
+                                      Gdiplus::LinearGradientModeVertical);
+    g.FillPath(&body, &disc);
+    { Gdiplus::Pen rim(GpC(RGB(0, 0, 0), 70), 1.0f); g.DrawEllipse(&rim, x, y, w - 1, h - 1); }
+    { Gdiplus::Pen hi(GpC(RGB(255, 255, 255), 150), 1.2f);
+      g.DrawArc(&hi, x + 1.4f, y + 1.2f, w - 3.8f, h - 3.8f, 200, 140); }   // top-left sheen
+    // Symbol, centred.
+    float cx = x + w / 2.0f, cy = y + h / 2.0f;
+    if (g_glyphStyle == 1) {            // PlayStation cross: two thick round-capped strokes (crisp at any size)
+        float s = w * 0.24f, tw = w * 0.15f; if (tw < 2.0f) tw = 2.0f;
+        Gdiplus::Pen pen(GpC(RGB(255, 255, 255)), tw);
+        pen.SetStartCap(Gdiplus::LineCapRound); pen.SetEndCap(Gdiplus::LineCapRound);
+        g.DrawLine(&pen, cx - s, cy - s, cx + s, cy + s);
+        g.DrawLine(&pen, cx - s, cy + s, cx + s, cy - s);
+    } else {                            // Xbox / Switch: a bold white 'A'
+        HFONT gf = CreateFontW((int)(h * 0.74f), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
+                               0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HGDIOBJ ogf = SelectObject(dc, gf);
+        SetTextColor(dc, RGB(255, 255, 255)); SetBkMode(dc, TRANSPARENT);
+        DrawTextW(dc, L"A", -1, &bg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, ogf); DeleteObject(gf);
+    }
+}
+static void PaintBgSlice(HWND h, HDC dc, int w, int hgt);   // defined with the toggle rendering below
+static bool BgActive(HWND hWnd);                            // defined below
+static void DrawComboListItem(LPDRAWITEMSTRUCT di);         // defined with the combo helpers below
 static void ThemeDrawButton(LPDRAWITEMSTRUCT d) {
     RECT r = d->rcItem;
+    int W = r.right - r.left, H = r.bottom - r.top;
     bool pressed   = (d->itemState & ODS_SELECTED) != 0;
-    bool isDefault = (d->itemState & ODS_DEFAULT) != 0;
+    // The affirmative actions (PLAY, Save) are the gold "primary" button. We key on the control id
+    // rather than ODS_DEFAULT: under a plain window / our own message loop that style bit doesn't
+    // reliably reach the owner-draw item, so the primary styling never actually showed.
+    bool isDefault = (d->itemState & ODS_DEFAULT) != 0 || d->CtlID == IDC_BTN_PLAY || d->CtlID == IDC_SET_SAVE;
     bool disabled  = (d->itemState & ODS_DISABLED) != 0;
-    COLORREF face = ThBtn();
-    if (pressed) face = g_dark ? RGB(72, 72, 76) : RGB(200, 200, 203);
-    HBRUSH fb = CreateSolidBrush(face); FillRect(d->hDC, &r, fb); DeleteObject(fb);
-    HPEN pen = CreatePen(PS_SOLID, isDefault ? 2 : 1, isDefault ? ThAccent() : ThBorder());
-    HGDIOBJ op = SelectObject(d->hDC, pen);
-    HGDIOBJ ob = SelectObject(d->hDC, GetStockObject(NULL_BRUSH));
-    Rectangle(d->hDC, r.left, r.top, r.right, r.bottom);
-    SelectObject(d->hDC, op); SelectObject(d->hDC, ob); DeleteObject(pen);
+    bool focused   = (d->itemState & ODS_FOCUS) != 0;
+    // Paint what's behind the rounded shape so the corners aren't square: the banner on the main
+    // window, the theme surface elsewhere.
+    if (BgActive(g_hMain) && GetParent(d->hwndItem) == g_hMain) PaintBgSlice(d->hwndItem, d->hDC, W, H);
+    else { HBRUSH bb = CreateSolidBrush(ThBg()); FillRect(d->hDC, &r, bb); DeleteObject(bb); }
+    // The default action (PLAY / Save) is an accent "primary" button; others are neutral surfaces.
+    COLORREF base = isDefault ? ThAccent() : ThBtn();
+    // Vertical gradient (lighter top, darker bottom) gives the face depth instead of a flat slab.
+    COLORREF faceTop = Lighten(base, isDefault ? 18 : 12);
+    COLORREF faceBot = Darken(base, isDefault ? 20 : 12);
+    if (pressed) { COLORREF t = faceTop; faceTop = Darken(faceBot, 6); faceBot = t; }  // invert = pushed in
+    const float rad = 7.0f;
+    const float bx = r.left + 0.5f, bw = W - 1.0f, bh = H - 1.0f;
+    {
+        Gdiplus::Graphics g(d->hDC);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        // Soft drop shadow: a few stacked, fading round rects offset downward (no real blur in GDI+,
+        // but stacked low-alpha passes read as a soft shadow), skipped while pressed.
+        if (!pressed)
+            for (int i = 3; i >= 1; --i)
+                GpFillRound(g, bx, r.top + 0.5f + i, bw, bh, rad, GpC(RGB(0, 0, 0), (BYTE)(i == 3 ? 10 : i == 2 ? 16 : 22)));
+        GpFillRoundVGrad(g, bx, r.top + 0.5f, bw, bh, rad, GpC(faceTop), GpC(faceBot));
+        // Inner top highlight (glass) + crisp outer border.
+        GpStrokeRound(g, bx + 1.0f, r.top + 1.5f, bw - 2.0f, bh - 2.0f, rad - 1,
+                      GpC(RGB(255, 255, 255), isDefault ? 70 : 55), 1.0f);
+        GpStrokeRound(g, bx, r.top + 0.5f, bw, bh, rad,
+                      GpC(isDefault ? Darken(ThAccent(), 30) : ThBorder(), isDefault ? 255 : 170), 1.0f);
+        if (focused)
+            GpStrokeRound(g, bx + 2.0f, r.top + 2.5f, bw - 4.0f, bh - 4.0f, rad - 1,
+                          GpC(g_dark ? RGB(255, 235, 170) : RGB(255, 255, 255)), 1.6f);
+    }
     wchar_t txt[64] = {0}; GetWindowTextW(d->hwndItem, txt, 64);
     SetBkMode(d->hDC, TRANSPARENT);
-    SetTextColor(d->hDC, disabled ? (g_dark ? RGB(120,120,120) : RGB(150,150,150)) : ThText());
+    SetTextColor(d->hDC, disabled ? (g_dark ? RGB(120,120,120) : RGB(150,150,150))
+                       : isDefault ? (g_dark ? RGB(28,22,10) : RGB(255,250,242))
+                       : ThText());
     HFONT of = (HFONT)SelectObject(d->hDC, g_uiFont);
-    RECT tr = r; if (pressed) { tr.left++; tr.top++; }
+    RECT tr = r; if (pressed) { tr.top++; }
     DrawTextW(d->hDC, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(d->hDC, of);
+    if (focused && g_xiConnected) {
+        int sz = 22, cx = r.right - 16, cy = (r.top + r.bottom) / 2;
+        RECT bg = { cx - sz / 2, cy - sz / 2, cx + sz / 2, cy + sz / 2 };
+        DrawGlyphInto(d->hDC, bg);
+    }
 }
 
 // The pre-composed banner for the active theme (null if it failed to load).
@@ -283,21 +414,127 @@ static void RepaintOverBg(HWND child) {
     RedrawWindow(g_hMain, &r, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
+// ---- modern toggle-switch rendering for checkboxes ----
+// Checkboxes stay real BS_AUTOCHECKBOX controls (so click/space/BM_GETCHECK keep working); we only
+// subclass their painting to draw a sliding switch + label, with the focus ring and controller badge
+// built in. The switch sits on the left so every row's switch lines up regardless of label length.
+// On the main window the rows sit over the banner, so we blit the matching banner slice behind each.
+static WNDPROC g_origCheckProc = nullptr;
+static void PaintBgSlice(HWND h, HDC dc, int w, int hgt) {
+    HBITMAP bmp = CurrentBg();
+    if (!bmp) { RECT r = {0,0,w,hgt}; FillRect(dc, &r, (HBRUSH)(COLOR_BTNFACE + 1)); return; }
+    BITMAP bm; GetObjectW(bmp, sizeof(bm), &bm);
+    RECT cr; GetClientRect(g_hMain, &cr);
+    POINT off = {0,0}; MapWindowPoints(h, g_hMain, &off, 1);
+    HDC mem = CreateCompatibleDC(dc); HGDIOBJ ob = SelectObject(mem, bmp);
+    SetStretchBltMode(dc, HALFTONE);
+    StretchBlt(dc, 0, 0, w, hgt, mem,
+               MulDiv(off.x, bm.bmWidth, cr.right), MulDiv(off.y, bm.bmHeight, cr.bottom),
+               MulDiv(w, bm.bmWidth, cr.right),     MulDiv(hgt, bm.bmHeight, cr.bottom), SRCCOPY);
+    SelectObject(mem, ob); DeleteDC(mem);
+}
+static void DrawToggleSwitch(HDC dc, int px, int py, int pw, int ph, bool on, bool enabled) {
+    // A disabled switch stays a clearly-shaped pill (muted track + a grey knob), so it reads as
+    // "greyed out", not as a lone floating circle the way a near-invisible track + white knob did.
+    COLORREF track = !enabled ? (g_dark ? RGB(74,74,82)  : RGB(210,212,218))
+                   : on       ? ThAccent()
+                              : (g_dark ? RGB(92,92,100)  : RGB(176,178,186));
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    GpFillRound(g, (float)px, (float)py, (float)pw, (float)ph, ph / 2.0f, GpC(track));
+    float kd = ph - 4.0f;
+    float kx = on ? (px + pw - kd - 2.0f) : (px + 2.0f), ky = py + 2.0f;
+    // Soft drop shadow under the knob (stacked low-alpha ellipses) instead of the old hard 1px
+    // outline -- that outline read as a harsh "skinny pixel line" ringing every switch.
+    for (int i = 2; i >= 1; --i) {
+        Gdiplus::SolidBrush sh(GpC(RGB(0, 0, 0), (BYTE)(i == 2 ? 16 : 26)));
+        g.FillEllipse(&sh, kx - 0.4f, ky + i * 0.9f, kd + 0.8f, kd + 0.8f);
+    }
+    COLORREF knob = enabled ? RGB(255, 255, 255) : (g_dark ? RGB(150, 150, 158) : RGB(238, 240, 244));
+    Gdiplus::SolidBrush kb(GpC(knob));
+    g.FillEllipse(&kb, kx, ky, kd, kd);
+}
+static void PaintToggle(HWND h, HDC dc) {
+    RECT rc; GetClientRect(h, &rc);
+    int W = rc.right, H = rc.bottom;
+    bool on = (SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    bool focused = (GetFocus() == h), enabled = IsWindowEnabled(h) != 0;
+    if (BgActive(g_hMain) && GetParent(h) == g_hMain) PaintBgSlice(h, dc, W, H);
+    else { HBRUSH b = CreateSolidBrush(ThBg()); FillRect(dc, &rc, b); DeleteObject(b); }
+    int pw = 30, ph = min(18, H - 2), px = 2, py = (H - ph) / 2;
+    DrawToggleSwitch(dc, px, py, pw, ph, on, enabled);
+    if (focused) {
+        Gdiplus::Graphics g(dc); g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        GpStrokeRound(g, px - 2.0f, py - 2.5f, pw + 4.0f, ph + 5.0f, (ph + 5) / 2.0f, GpC(ThAccent()), 2.0f);
+    }
+    SetBkMode(dc, TRANSPARENT);
+    COLORREF txtc = !enabled ? (g_dark ? RGB(120,120,120) : RGB(150,150,150))
+                  : (h == g_chkAutoUpdate) ? (g_dark ? RGB(20,20,20) : RGB(230,230,230))
+                  : (focused ? ThAccent() : ThText());
+    SetTextColor(dc, txtc);
+    HFONT of = (HFONT)SelectObject(dc, g_uiFont);
+    wchar_t label[128] = {0}; GetWindowTextW(h, label, 128);
+    RECT tr = rc; tr.left = px + pw + 6; tr.right = W - 4;
+    DrawTextW(dc, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(dc, of);
+    if (focused && g_xiConnected) {
+        int sz = 22, bx = W - 7 - sz, by = (H - sz) / 2;
+        RECT bg = { bx, by, bx + sz, by + sz };
+        DrawGlyphInto(dc, bg);
+    }
+}
+static LRESULT CALLBACK ToggleProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_ERASEBKGND) return 1;
+    if (m == WM_PAINT) {   // double-buffered so nothing flickers
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT rc; GetClientRect(h, &rc);
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        HGDIOBJ ob = SelectObject(mem, bmp);
+        PaintToggle(h, mem);
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, ob); DeleteObject(bmp); DeleteDC(mem);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    LRESULT r = CallWindowProcW(g_origCheckProc, h, m, w, l);
+    // The native checkbox paints its pressed box directly (outside WM_PAINT) on press/toggle/focus,
+    // so repaint over it then -- but NOT on WM_MOUSEMOVE (that caused the hover flicker).
+    switch (m) {
+        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+        case WM_KEYDOWN: case WM_KEYUP: case BM_SETSTATE: case BM_SETCHECK:
+        case WM_SETFOCUS: case WM_KILLFOCUS: case WM_ENABLE:
+            InvalidateRect(h, nullptr, FALSE); UpdateWindow(h);
+            break;
+    }
+    return r;
+}
+static void MakeToggle(HWND h) {
+    if (!h) return;
+    WNDPROC prev = (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)ToggleProc);
+    if (!g_origCheckProc) g_origCheckProc = prev;
+}
+
 // Shared themed message handling for every launcher window. Returns true (with *result set)
 // when it handled the message; in light mode it mostly declines so the OS draws natively.
 static bool ThemeHandle(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, LRESULT* result) {
     switch (msg) {
     case WM_ERASEBKGND:
         if (BgActive(hWnd)) { PaintBg(hWnd, (HDC)wParam); *result = 1; return true; }
-        if (g_dark) { RECT rc; GetClientRect(hWnd, &rc); FillRect((HDC)wParam, &rc, g_brBg); *result = 1; return true; }
-        return false;
+        { RECT rc; GetClientRect(hWnd, &rc); FillRect((HDC)wParam, &rc, g_brBg); *result = 1; return true; }
     case WM_CTLCOLORSTATIC:
+        if (g_hdrFont && (HFONT)SendMessageW((HWND)lParam, WM_GETFONT, 0, 0) == g_hdrFont) {
+            SetTextColor((HDC)wParam, ThAccent());      // section headers in the accent colour
+            SetBkMode((HDC)wParam, BgActive(hWnd) ? TRANSPARENT : OPAQUE);
+            SetBkColor((HDC)wParam, ThBg());
+            *result = (LRESULT)(BgActive(hWnd) ? GetStockObject(NULL_BRUSH) : g_brBg);
+            return true;
+        }
         if ((HWND)lParam == g_lnkPractice) {            // the download link keeps a blue
             SetTextColor((HDC)wParam, g_dark ? RGB(90, 160, 250) : RGB(0, 90, 200));
             SetBkColor((HDC)wParam, ThBg());
             SetBkMode((HDC)wParam, BgActive(hWnd) ? TRANSPARENT : OPAQUE);
-            *result = (LRESULT)(BgActive(hWnd) ? GetStockObject(NULL_BRUSH)
-                                               : (g_dark ? g_brBg : GetSysColorBrush(COLOR_BTNFACE)));
+            *result = (LRESULT)(BgActive(hWnd) ? GetStockObject(NULL_BRUSH) : g_brBg);
             return true;
         }
         // fall through to the generic static/button colouring
@@ -313,7 +550,6 @@ static bool ThemeHandle(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, LRESU
             *result = (LRESULT)GetStockObject(NULL_BRUSH);
             return true;
         }
-        if (!g_dark) return false;
         SetTextColor((HDC)wParam, ThText());
         SetBkColor((HDC)wParam, ThBg());
         SetBkMode((HDC)wParam, OPAQUE);
@@ -321,7 +557,6 @@ static bool ThemeHandle(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, LRESU
         return true;
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX:
-        if (!g_dark) return false;
         SetTextColor((HDC)wParam, ThText());
         SetBkColor((HDC)wParam, ThField());
         SetBkMode((HDC)wParam, OPAQUE);
@@ -329,7 +564,8 @@ static bool ThemeHandle(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, LRESU
         return true;
     case WM_DRAWITEM: {
         LPDRAWITEMSTRUCT d = (LPDRAWITEMSTRUCT)lParam;
-        if (d->CtlType == ODT_BUTTON) { ThemeDrawButton(d); *result = TRUE; return true; }
+        if (d->CtlType == ODT_BUTTON)   { ThemeDrawButton(d);   *result = TRUE; return true; }
+        if (d->CtlType == ODT_COMBOBOX) { DrawComboListItem(d); *result = TRUE; return true; }
         return false;
     }
     }
@@ -455,6 +691,11 @@ RequireLauncher=1
 ; is 1; untick "Auto-Update" on the launcher to turn it off. A missing core d3d9.dll is always
 ; re-fetched regardless of this setting.
 AutoUpdate=1
+
+; Auto-Play: 1 = on launch, count down from 5 and then start the game automatically (any key,
+; click, or controller button cancels the countdown so you can still configure). 0 = off (default).
+; Handy for controller / couch play so you can boot straight into the game past the launcher.
+AutoPlay=0
 
 [PhantomUnleashed]
 ; Built-in phantom-cap raiser. Rewrite of Metal-Crow's MultiPhantom/Overhaul patch on
@@ -1305,6 +1546,13 @@ static HWND DsMakeLabel(HWND parent, const wchar_t* text, int x, int y, int w) {
     SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
     return h;
 }
+// A clean, semibold, accent section header (ThemeHandle colours any g_hdrFont control with ThAccent).
+static HWND DsMakeHeader(HWND parent, const wchar_t* text, int x, int y, int w) {
+    HWND h = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                           x, y, w, 18, parent, nullptr, g_inst, nullptr);
+    SendMessageW(h, WM_SETFONT, (WPARAM)(g_hdrFont ? g_hdrFont : g_uiFont), TRUE);
+    return h;
+}
 static HWND DsMakeEdit(HWND parent, int id, const std::string& val, int x, int y, int w) {
     std::wstring wv(val.begin(), val.end());
     HWND h = CreateWindowW(L"EDIT", wv.c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
@@ -1312,9 +1560,11 @@ static HWND DsMakeEdit(HWND parent, int id, const std::string& val, int x, int y
     SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
     return h;
 }
+static void MakeComboFlat(HWND h);   // defined just below
 static HWND DsMakeCombo(HWND parent, int id, int x, int y, int w,
                         const std::vector<std::wstring>& items, const std::string& current) {
-    HWND h = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+    HWND h = CreateWindowW(L"COMBOBOX", L"",
+                           WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
                            x, y, w, 200, parent, (HMENU)(INT_PTR)id, g_inst, nullptr);
     SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
     std::wstring cur(current.begin(), current.end());
@@ -1325,13 +1575,70 @@ static HWND DsMakeCombo(HWND parent, int id, int x, int y, int w,
     }
     SendMessageW(h, CB_SETCURSEL, sel, 0);
     NoWheel(h);
+    MakeComboFlat(h);
     return h;
+}
+// ---- flat, modern combobox ----
+// We custom-paint the closed field (flat fill + text + chevron + rounded border) and theme the
+// drop-down list items, so the dropdowns stop looking like Win98 native combos.
+static void DrawComboListItem(LPDRAWITEMSTRUCT di) {
+    if ((int)di->itemID < 0) { return; }
+    bool sel = (di->itemState & ODS_SELECTED) != 0;
+    HBRUSH bb = CreateSolidBrush(sel ? ThAccent() : ThField()); FillRect(di->hDC, &di->rcItem, bb); DeleteObject(bb);
+    wchar_t txt[160] = {0}; SendMessageW(di->hwndItem, CB_GETLBTEXT, di->itemID, (LPARAM)txt);
+    SetBkMode(di->hDC, TRANSPARENT);
+    SetTextColor(di->hDC, sel ? (g_dark ? RGB(28,22,10) : RGB(255,250,242)) : ThText());
+    HFONT of = (HFONT)SelectObject(di->hDC, g_uiFont);
+    RECT tr = di->rcItem; tr.left += 9;
+    DrawTextW(di->hDC, txt, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(di->hDC, of);
+}
+static LRESULT CALLBACK ComboProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    WNDPROC orig = (WNDPROC)GetPropW(h, L"mctdeCombo");
+    if (m == WM_ERASEBKGND) return 1;
+    if (m == WM_PAINT) {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT rc; GetClientRect(h, &rc);
+        bool enabled = IsWindowEnabled(h) != 0;
+        bool focused = (GetFocus() == h);
+        HBRUSH fb = CreateSolidBrush(enabled ? ThField() : ThBtn()); FillRect(dc, &rc, fb); DeleteObject(fb);
+        int sel = (int)SendMessageW(h, CB_GETCURSEL, 0, 0);
+        wchar_t txt[160] = {0}; if (sel >= 0) SendMessageW(h, CB_GETLBTEXT, sel, (LPARAM)txt);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, enabled ? ThText() : (g_dark ? RGB(120,120,120) : RGB(150,150,150)));
+        HFONT of = (HFONT)SelectObject(dc, g_uiFont);
+        RECT tr = rc; tr.left += 9; tr.right -= 22;
+        DrawTextW(dc, txt, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(dc, of);
+        Gdiplus::Graphics g(dc); g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::Pen cp(GpC(ThText(), 190), 1.6f);
+        float cx = rc.right - 13.0f, cy = (rc.top + rc.bottom) / 2.0f - 1.0f;
+        g.DrawLine(&cp, cx - 4, cy - 1.0f, cx, cy + 3.0f);
+        g.DrawLine(&cp, cx, cy + 3.0f, cx + 4, cy - 1.0f);
+        // Pass the full outer rect + pen width; GpStrokeRound insets by pw/2 itself, so the border
+        // is an even thickness on all four sides (the old double-inset made it look uneven/broken).
+        float bw = focused ? 2.0f : 1.0f;
+        GpStrokeRound(g, 0.0f, 0.0f, (float)rc.right, (float)rc.bottom, 5.0f,
+                      GpC(focused ? ThAccent() : ThBorder(), focused ? 255 : 170), bw);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    LRESULT r = CallWindowProcW(orig, h, m, w, l);
+    if (m == WM_SETFOCUS || m == WM_KILLFOCUS || m == CB_SETCURSEL) InvalidateRect(h, nullptr, FALSE);
+    return r;
+}
+static void MakeComboFlat(HWND h) {
+    SendMessageW(h, CB_SETITEMHEIGHT, (WPARAM)-1, 22);   // closed field height
+    SendMessageW(h, CB_SETITEMHEIGHT, 0, 22);            // drop-down row height
+    WNDPROC prev = (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)ComboProc);
+    SetPropW(h, L"mctdeCombo", (HANDLE)prev);
 }
 static HWND DsMakeCheck(HWND parent, int id, const wchar_t* text, bool checked) {
     HWND h = CreateWindowW(L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                            0, 0, 10, 22, parent, (HMENU)(INT_PTR)id, g_inst, nullptr);
     SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
     SendMessageW(h, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
+    MakeToggle(h);   // render as a modern slide switch
     return h;
 }
 // small helpers to read control state
@@ -1401,7 +1708,8 @@ static const std::vector<std::string>  LOG_VAL = {
 static HWND MakeMappedCombo(HWND parent, int id, int w,
                             const std::vector<std::wstring>& labels,
                             const std::vector<std::string>& values, const std::string& cur) {
-    HWND h = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+    HWND h = CreateWindowW(L"COMBOBOX", L"",
+                           WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
                            0, 0, w, 200, parent, (HMENU)(INT_PTR)id, g_inst, nullptr);
     SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
     int sel = 0;
@@ -1411,6 +1719,7 @@ static HWND MakeMappedCombo(HWND parent, int id, int w,
     }
     SendMessageW(h, CB_SETCURSEL, sel, 0);
     NoWheel(h);
+    MakeComboFlat(h);
     return h;
 }
 static std::string MappedValue(HWND h, const std::vector<std::string>& values) {
@@ -1555,10 +1864,10 @@ static void sh(HWND h, bool v) { ShowWindow(h, v ? SW_SHOW : SW_HIDE); }
 // window: the panel is a fixed-size, scrolling child of the tabbed Settings dialog.
 static int DsfixLayout(HWND hWnd) {
     const bool adv = g_advanced;
-    const int LX = 16, FX = 178, ROW = 26, HDR = 22;
+    const int LX = 16, FX = 178, ROW = 30, HDR = 28;   // looser row pitch + header gap for breathing room
     RECT cr; GetClientRect(hWnd, &cr);
     const int CWp = max(360, (int)cr.right);   // panel client width (excludes the scrollbar)
-    int y = 14;
+    int y = 16;
 
     mv(U.adv, LX, y, 250, 22);
     mv(U.editIni, CWp - 126, y, 110, 24);   // top-right: open dsfix.ini in the default editor
@@ -1701,7 +2010,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         g_hudOpacity = G("hudOpacity", "1.0");
 
         U.adv = DsMakeCheck(hWnd, IDC_DS_ADV, L"Enable Advanced Options", false);
-        U.hdrVideo = DsMakeLabel(hWnd, L"--- Video ---", 0, 0, 250);
+        U.hdrVideo = DsMakeHeader(hWnd, L"Video", 0, 0, 250);
 
         U.lblRes = DsMakeLabel(hWnd, L"Internal resolution (W x H)", 0, 0, 150);
         U.rw = DsMakeEdit(hWnd, IDC_DS_RW, G("renderWidth", "1920"), 0, 0, 56);
@@ -1733,18 +2042,18 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         // AA Quality is meaningless when antialiasing is off.
         if (aaInit == "none") EnableWindow(U.aaQual, FALSE);
 
-        U.hdrOther = DsMakeLabel(hWnd, L"--- Other ---", 0, 0, 250);
+        U.hdrOther = DsMakeHeader(hWnd, L"Other", 0, 0, 250);
         U.skipIntro = DsMakeCheck(hWnd, IDC_DS_SKIP, L"Skip intro", G("skipIntro", "1") == "1");
         U.lblLog = DsMakeLabel(hWnd, L"Log Level", 0, 0, 66);
         U.logLvl = MakeMappedCombo(hWnd, IDC_DS_LOG, 96, LOG_LBL, LOG_VAL, G("logLevel", "6"));
 
-        U.hdrCursor = DsMakeLabel(hWnd, L"--- Cursor ---", 0, 0, 250);
+        U.hdrCursor = DsMakeHeader(hWnd, L"Cursor", 0, 0, 250);
         U.capCur = DsMakeCheck(hWnd, IDC_DS_CAPCUR, L"Capture cursor", G("captureCursor", "1") == "1");
         U.disCur = DsMakeCheck(hWnd, IDC_DS_DISCUR, L"Disable cursor", G("disableCursor", "1") == "1");
 
         // Dinput DLL chaining (Advanced): a cascading list of dropdowns. The first holds
         // DSFix's dinput8dllWrapper; extras are stored in dinputChain1..9 (DSFix ignores them).
-        U.hdrDinput = DsMakeLabel(hWnd, L"--- Dinput DLL Chaining ---", 0, 0, 280);
+        U.hdrDinput = DsMakeHeader(hWnd, L"Dinput DLL Chaining", 0, 0, 280);
         for (int i = 0; i < 10; ++i) {
             std::string cur = (i == 0) ? G("dinput8dllWrapper", "none")
                                        : G(("dinputChain" + std::to_string(i)).c_str(), "none");
@@ -1752,7 +2061,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         }
 
         // DoF
-        U.hdrDof = DsMakeLabel(hWnd, L"--- Depth of Field ---", 0, 0, 250);
+        U.hdrDof = DsMakeHeader(hWnd, L"Depth of Field", 0, 0, 250);
         U.lblDofRes = DsMakeLabel(hWnd, L"DOF override resolution", 0, 0, 150);
         U.dofRes = DsMakeEdit(hWnd, IDC_DS_DOFRES, G("dofOverrideResolution", "540"), 0, 0, 60);
         U.disDofScale = DsMakeCheck(hWnd, IDC_DS_DISDOFSCL, L"Disable DOF scaling", G("disableDofScaling", "1") == "1");
@@ -1761,7 +2070,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         U.defDof = DsMakeCheck(hWnd, IDC_DS_DEFDOF, L"Original DoF", false);
 
         // Framerate
-        U.hdrFps = DsMakeLabel(hWnd, L"--- Framerate ---", 0, 0, 250);
+        U.hdrFps = DsMakeHeader(hWnd, L"Framerate", 0, 0, 250);
         U.unlockFps = DsMakeCheck(hWnd, IDC_DS_UNLOCKFPS, L"Unlock FPS", G("unlockFPS", "1") == "1");
         U.lblFpsLimit = DsMakeLabel(hWnd, L"FPS limit", 0, 0, 110);
         U.fpsLimit = DsMakeEdit(hWnd, IDC_DS_FPSLIMIT, G("FPSlimit", "30"), 0, 0, 56);
@@ -1773,7 +2082,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         g_defDofInit = CtlChecked(U.defDof);
 
         // Backups (advanced)
-        U.hdrBackup = DsMakeLabel(hWnd, L"--- Save Game Backup Options ---", 0, 0, 280);
+        U.hdrBackup = DsMakeHeader(hWnd, L"Save Game Backup Options", 0, 0, 280);
         U.enBackup = DsMakeCheck(hWnd, IDC_DS_ENBACKUP, L"Enable backups", G("enableBackups", "1") == "1");
         U.lblBkpInt = DsMakeLabel(hWnd, L"Backup interval", 0, 0, 150);
         U.bkpInt = DsMakeEdit(hWnd, IDC_DS_BKPINT, G("backupInterval", "10"), 0, 0, 60);
@@ -1781,7 +2090,7 @@ static LRESULT CALLBACK DsfixWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         U.bkpMax = DsMakeEdit(hWnd, IDC_DS_BKPMAX, G("maxBackups", "10"), 0, 0, 60);
 
         // Not-ready section (advanced)
-        U.hdrNotReady = DsMakeLabel(hWnd, L"--- These settings are not ready to use ---", 0, 0, 360);
+        U.hdrNotReady = DsMakeHeader(hWnd, L"Not ready to use", 0, 0, 360);
         U.forceWin = DsMakeCheck(hWnd, IDC_DS_FORCEWIN, L"ForceWindowed/ForceFullscreen", G("forceWindowed", "0") == "1");
         U.enVsync = DsMakeCheck(hWnd, IDC_DS_ENVSYNC, L"Enable Vsync", G("enableVsync", "0") == "1");
         U.lblFsHz = DsMakeLabel(hWnd, L"Fullscreen Hz", 0, 0, 150);
@@ -2077,17 +2386,19 @@ struct McDef { int kind; const wchar_t* label; const wchar_t* sec; const wchar_t
                const wchar_t* def; bool adv; const wchar_t** items; int nItems; };
 static const wchar_t* IT_MODE[]    = { L"Ask", L"On", L"Off" };
 static const wchar_t* IT_BACKEND[] = { L"d3d", L"gdi" };
+static const wchar_t* IT_ICONS[]   = { L"Xbox", L"PlayStation", L"Switch" };
 static McDef g_def[] = {
     {0,L"General",                       0,0,0,false,0,0},
+    {4,L"Controller button icons",       L"Launcher",L"ControllerIcons",L"Xbox",false,IT_ICONS,3},
     {1,L"Hide soul counter (entire bottom-right)", L"HideSoulCounter",L"Enabled",L"1",false,0,0},
     {1,L"Enable overlay logging",        L"Settings",L"EnableLogging",L"0",false,0,0},
     {1,L"Quit game cleanly on window close", L"Settings",L"ExitWithGame",L"1",false,0,0},
     {1,L"Require launcher to start the game", L"Launcher",L"RequireLauncher",L"1",false,0,0},
     {0,L"Multiplayer overlay",            0,0,0,false,0,0},
     {1,L"Show HP readout",               L"HP",L"Enabled",L"1",false,0,0},
-    {0,L"Overlay rendering",              0,0,0,false,0,0},
-    {4,L"Overlay backend",               L"Render",L"Backend",L"d3d",false,IT_BACKEND,2},
-    {2,L"Overlay refresh (ms)",          L"Render",L"SubmitMs",L"66",false,0,0},
+    {0,L"Overlay rendering",              0,0,0,true,0,0},
+    {4,L"Overlay backend",               L"Render",L"Backend",L"d3d",true,IT_BACKEND,2},
+    {2,L"Overlay refresh (ms)",          L"Render",L"SubmitMs",L"66",true,0,0},
     // -------- advanced --------
     {0,L"Overlay (advanced)",        0,0,0,true,0,0},
     {2,L"Line height",                   L"Overlay",L"LineHeight",L"20",true,0,0},
@@ -2372,7 +2683,7 @@ static void McDrawFontItem(LPDRAWITEMSTRUCT di) {
 static int McLayout() {
     RECT vr; GetClientRect(M.view, &vr);
     const int CW = max(300, (int)vr.right);   // viewport client width (excludes the scrollbar)
-    const int LX = 14, FX = 116, ROW = 26, HDRH = 24, PVX = 264, PVH = 168;
+    const int LX = 14, FX = 116, ROW = 30, HDRH = 28, PVX = 264, PVH = 168;   // looser spacing
     const int PVW = max(150, CW - PVX - 10);
     int y = 8;
     int s = g_mcScroll;
@@ -2381,7 +2692,7 @@ static int McLayout() {
     // ---- Overlay group (special widgets) + live preview on the right ----
     SetWindowPos(M.hdrOv, nullptr, LX, y - s, 240, 18, SWP_NOZORDER); y += HDRH;
     int ovTop = y;
-    P(M.classicFont, LX, y, 260, 22); y += 23;
+    P(M.classicFont, LX, y, 260, 22); y += 27;
     // Control column aligned with the data-driven table below (FX), so the longer labels
     // ("Screen corner", "HP Display") no longer get overpainted by their control. WIDE caps a
     // control's width so it still clears the live preview pinned on the right.
@@ -2407,9 +2718,9 @@ static int McLayout() {
     P(M.lblPadX,   LX, y + 3, LBLW, 18); P(M.padX,   CX, y, WIDE, 26);  y += ROW;
     P(M.lblPadY,   LX, y + 3, LBLW, 18); P(M.padY,   CX, y, WIDE, 26);  y += ROW;
     P(M.lblHpDisp, LX, y + 3, LBLW, 18); P(M.hpDisp, CX, y, WIDE, 220); y += ROW;
-    P(M.showPing,   LX, y, 240, 22); y += 23;
-    P(M.showName,   LX, y, 240, 22); y += 23;
-    P(M.forceTop,   LX, y, 240, 22); y += 23;
+    P(M.showPing,   LX, y, 240, 22); y += 27;
+    P(M.showName,   LX, y, 240, 22); y += 27;
+    P(M.forceTop,   LX, y, 240, 22); y += 27;
     // preview pinned at the top-right of the overlay group
     SetWindowPos(M.preview, nullptr, PVX, ovTop - s, PVW, PVH, SWP_NOZORDER);
     if (y < ovTop + PVH + 4) y = ovTop + PVH + 4;
@@ -2424,7 +2735,7 @@ static int McLayout() {
         if (d.kind == 0) {                       // section header
             P(M.ctl[i], LX, y + 4, CW - 2 * LX, 18); y += HDRH + 2;
         } else if (d.kind == 1) {                // checkbox
-            P(M.ctl[i], LX, y, CW - 2 * LX, 22); y += 24;
+            P(M.ctl[i], LX, y, CW - 2 * LX, 22); y += 28;
         } else {                                 // labelled edit/combo
             // The table's labels (the longest is "Manual nudge key (VK hex)", 131px) run wider than
             // the overlay group's, and nothing is pinned to their right, so give them their own
@@ -2660,6 +2971,7 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 // panels (each a scrolling child) and a single shared Save / Cancel bar. Save writes both
 // inis (whichever panels are present); Cancel discards everything.
 static HWND g_setTabDs = nullptr, g_setTabMc = nullptr;
+static HWND g_setHost = nullptr;   // the Settings host window while open (for controller tab-switch)
 static HWND g_setDsPanel = nullptr, g_setMcPanel = nullptr;  // tab bodies (real panels or placeholders)
 static bool g_setDsAvail = false;                            // dsfix.ini present -> DSFix panel is a real editor
 static bool g_setMcAvail = false;                            // mctde-link.ini present -> mctde panel is real
@@ -2715,6 +3027,8 @@ static void SettingsApplySize() {
     InvalidateRect(dlg, nullptr, TRUE);
 }
 
+static void XiFocusFirstIn(HWND panel);   // defined with the XInput nav block; lands focus on a panel's first control
+
 static void SettingsSelectTab(int tab) {
     g_setTab = tab;
     ShowWindow(g_setDsPanel, tab == 0 ? SW_SHOW : SW_HIDE);
@@ -2722,24 +3036,40 @@ static void SettingsSelectTab(int tab) {
     SettingsApplySize();                         // refit the window to this tab's content
     InvalidateRect(g_setTabDs, nullptr, TRUE);   // repaint the strip so active/inactive styling updates
     InvalidateRect(g_setTabMc, nullptr, TRUE);
-    SetFocus(tab == 0 ? g_setDsPanel : g_setMcPanel);
+    XiFocusFirstIn(tab == 0 ? g_setDsPanel : g_setMcPanel);   // start on the first field, not the tab strip
 }
 
 // A tab button: the active one gets the field fill + a 2px accent border; the rest look like
 // a normal themed button. (Intercepted before ThemeHandle's generic button drawer.)
 static void SettingsDrawTab(LPDRAWITEMSTRUCT d, bool active) {
     RECT r = d->rcItem;
-    HBRUSH b = CreateSolidBrush(active ? ThField() : ThBtn()); FillRect(d->hDC, &r, b); DeleteObject(b);
-    HPEN pen = CreatePen(PS_SOLID, active ? 2 : 1, active ? ThAccent() : ThBorder());
-    HGDIOBJ op = SelectObject(d->hDC, pen), ob = SelectObject(d->hDC, GetStockObject(NULL_BRUSH));
-    Rectangle(d->hDC, r.left, r.top, r.right, r.bottom);
-    SelectObject(d->hDC, op); SelectObject(d->hDC, ob); DeleteObject(pen);
+    int W = r.right - r.left, H = r.bottom - r.top;
+    bool focused = (d->itemState & ODS_FOCUS) != 0;   // the tab the controller/keyboard is on
+    bool hot = active || focused;
+    { HBRUSH bb = CreateSolidBrush(g_dark ? ThBg() : GetSysColor(COLOR_BTNFACE)); FillRect(d->hDC, &r, bb); DeleteObject(bb); }
+    {
+        Gdiplus::Graphics g(d->hDC);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        // Active tab is accent-filled (pill); an inactive one is a subtle neutral chip.
+        COLORREF face = active ? ThAccent() : ThBtn();
+        GpFillRound(g, r.left + 0.5f, r.top + 0.5f, W - 1.0f, H - 1.0f, 7.0f, GpC(face));
+        if (!active)
+            GpStrokeRound(g, r.left + 0.5f, r.top + 0.5f, W - 1.0f, H - 1.0f, 7.0f, GpC(ThBorder(), 150), 1.0f);
+        if (focused)
+            GpStrokeRound(g, r.left + 2.0f, r.top + 2.0f, W - 4.0f, H - 4.0f, 6.0f,
+                          GpC(active ? (g_dark ? RGB(255,235,170) : RGB(255,255,255)) : ThAccent()), 1.8f);
+    }
     wchar_t txt[64] = {0}; GetWindowTextW(d->hwndItem, txt, 64);
     SetBkMode(d->hDC, TRANSPARENT);
-    SetTextColor(d->hDC, active ? ThAccent() : ThText());
+    SetTextColor(d->hDC, active ? (g_dark ? RGB(28,22,10) : RGB(255,250,242)) : (hot ? ThAccent() : ThText()));
     HFONT of = (HFONT)SelectObject(d->hDC, g_uiFont);
     DrawTextW(d->hDC, txt, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(d->hDC, of);
+    if (focused && g_xiConnected) {
+        int sz = 18, cx = r.right - 13, cy = (r.top + r.bottom) / 2;
+        RECT bg = { cx - sz / 2, cy - sz / 2, cx + sz / 2, cy + sz / 2 };
+        DrawGlyphInto(d->hDC, bg);
+    }
 }
 
 static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -2830,7 +3160,7 @@ static void OpenSettings(HWND owner, int initialTab) {
     // whichever tab is showing (DSFix basic stays short; mctde and tall DSFix pages scroll).
     g_setMcAvail = mcAvail;
     if (mcAvail) {
-        g_setMcPanel = CreateWindowExW(0, L"mctdeSettings", L"", WS_CHILD | WS_CLIPCHILDREN,
+        g_setMcPanel = CreateWindowExW(WS_EX_CONTROLPARENT, L"mctdeSettings", L"", WS_CHILD | WS_CLIPCHILDREN,
             0, SET_PANELY, CW, maxPanelH, dlg, nullptr, g_inst, nullptr);
     } else {
         g_setMcPanel = CreateWindowW(L"STATIC", L"mctde-link.ini was not found next to the launcher.",
@@ -2840,7 +3170,7 @@ static void OpenSettings(HWND owner, int initialTab) {
     // DSFix tab body (DSFix is user-installed, so dsfix.ini may be absent)
     g_setDsAvail = dsAvail;
     if (dsAvail) {
-        g_setDsPanel = CreateWindowExW(0, L"mctdeDsfixConfig", L"", WS_CHILD | WS_VSCROLL | WS_CLIPCHILDREN,
+        g_setDsPanel = CreateWindowExW(WS_EX_CONTROLPARENT, L"mctdeDsfixConfig", L"", WS_CHILD | WS_VSCROLL | WS_CLIPCHILDREN,
             0, SET_PANELY, CW, maxPanelH, dlg, nullptr, g_inst, nullptr);
     } else {
         g_setDsPanel = CreateWindowW(L"STATIC",
@@ -2852,6 +3182,9 @@ static void OpenSettings(HWND owner, int initialTab) {
     if (!dsAvail && initialTab == 0) initialTab = 1;   // don't open on an empty DSFix tab
     if (!mcAvail && initialTab == 1) initialTab = 0;
     SettingsSelectTab(initialTab);                     // fits + positions everything
+    g_setHost = dlg;                                   // let the controller poll switch tabs (LB/RB)
+    // Show focus rectangles from the start so keyboard/controller navigation is visible.
+    SendMessageW(dlg, WM_CHANGEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS | UISF_HIDEACCEL), 0);
     ShowWindow(dlg, SW_SHOWNORMAL);
     SetForegroundWindow(dlg);
 
@@ -2868,6 +3201,7 @@ static void OpenSettings(HWND owner, int initialTab) {
     }
     EnableWindow(owner, TRUE);
     SetForegroundWindow(owner);
+    g_setHost = nullptr;
     g_setTabDs = g_setTabMc = g_setDsPanel = g_setMcPanel = nullptr;
 }
 
@@ -3082,6 +3416,20 @@ static bool AutoUpdateEnabled() {
 static void SetAutoUpdate(bool on) {
     WritePrivateProfileStringW(L"Launcher", L"AutoUpdate", on ? L"1" : L"0", PathIn(L"mctde-link.ini").c_str());
 }
+static bool AutoPlayEnabled() {
+    return GetPrivateProfileIntW(L"Launcher", L"AutoPlay", 0, PathIn(L"mctde-link.ini").c_str()) != 0;
+}
+static void SetAutoPlay(bool on) {
+    WritePrivateProfileStringW(L"Launcher", L"AutoPlay", on ? L"1" : L"0", PathIn(L"mctde-link.ini").c_str());
+}
+// Controller icon set shown on focused controls: Xbox (default) | PlayStation | Switch.
+static int ReadGlyphStyle() {
+    wchar_t b[16] = {0};
+    GetPrivateProfileStringW(L"Launcher", L"ControllerIcons", L"Xbox", b, 16, PathIn(L"mctde-link.ini").c_str());
+    if (_wcsicmp(b, L"PlayStation") == 0) return 1;
+    if (_wcsicmp(b, L"Switch") == 0)      return 2;
+    return 0;
+}
 
 static std::string TrimStr(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n"); if (a == std::string::npos) return "";
@@ -3275,6 +3623,21 @@ static bool FindDscmProcess(std::wstring& outPath) {
 }
 static bool DscmRunning() { std::wstring p; return FindDscmProcess(p); }
 
+// True if a process with this exe name is running.
+static bool ProcessRunning(const wchar_t* exeName) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do { if (_wcsicmp(pe.szExeFile, exeName) == 0) { found = true; break; } }
+        while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+static bool GameRunning() { return ProcessRunning(L"DARKSOULS.exe") || ProcessRunning(L"DATA.exe"); }
+
 // The path we'd launch DSCM from, in priority order:
 //   1. a running instance (also captured as the saved path),
 //   2. the remembered path if it still exists,
@@ -3352,6 +3715,367 @@ static void ApplyAnd(HWND hWnd, bool launch) {
     }
 }
 
+// ---- Auto-Play: when enabled, count down from 5 on launch, then start the game automatically.
+// While counting down the PLAY button reads "STOP (5)" ... -- pressing it (or any key / click /
+// controller input) stops the countdown, and the button goes back to "PLAY" with no countdown
+// until the next relaunch.
+//
+// Loop safety: the launcher guard ([Launcher] RequireLauncher) bounces a direct DARKSOULS.exe start
+// back to the launcher, but LaunchGame marks its child with MCTDE_VIA_LAUNCHER so a launcher-started
+// game is let through and never bounces -- that handshake is what stops Auto-Play ping-ponging with
+// the guard. On top of that we skip Auto-Play entirely when the game is already running, so it can
+// never stack a second instance.
+static void CancelAutoPlay() {
+    if (!g_autoActive) return;
+    g_autoActive = false;
+    KillTimer(g_hMain, IDT_AUTOPLAY);
+    if (g_btnPlay) { SetWindowTextW(g_btnPlay, L"PLAY"); InvalidateRect(g_btnPlay, nullptr, TRUE); }
+}
+static void AutoPlayTick(HWND hWnd) {
+    if (!g_autoActive) return;
+    if (--g_autoCount <= 0) {
+        g_autoActive = false;
+        KillTimer(hWnd, IDT_AUTOPLAY);
+        if (g_btnPlay) SetWindowTextW(g_btnPlay, L"PLAY");
+        ApplyAnd(hWnd, true);                 // apply saved toggles + launch
+        return;
+    }
+    wchar_t t[16]; wsprintfW(t, L"STOP (%d)", g_autoCount);
+    if (g_btnPlay) { SetWindowTextW(g_btnPlay, t); InvalidateRect(g_btnPlay, nullptr, TRUE); }
+}
+static void StartAutoPlay(HWND hWnd) {
+    if (!AutoPlayEnabled()) return;
+    if (GameRunning()) return;                // the game's already up -- don't launch a second copy
+    g_autoActive = true; g_autoCount = 5;
+    wchar_t t[16]; wsprintfW(t, L"STOP (%d)", g_autoCount);
+    if (g_btnPlay) { SetWindowTextW(g_btnPlay, t); InvalidateRect(g_btnPlay, nullptr, TRUE); }
+    SetTimer(hWnd, IDT_AUTOPLAY, 1000, nullptr);
+}
+
+// ------------------------------------------------------------ gamepad (XInput) UI navigation
+// Lets a controller drive the launcher without a mouse. XInput is loaded dynamically (so a
+// missing DLL never breaks launch, and it works under Proton/Wine where XInput bridges to the
+// pad). The stick/d-pad and face buttons are translated into the same keystrokes the dialog
+// manager already handles (every window loop runs IsDialogMessageW), so the whole existing UI
+// becomes controller-navigable with no rewrite. Synthesised input only goes out while one of our
+// own windows is foreground, so holding the stick never leaks keys into the game or other apps.
+typedef struct { WORD wButtons; BYTE bLeftTrigger, bRightTrigger;
+                 SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY; } XiGamepad;
+typedef struct { DWORD dwPacketNumber; XiGamepad Gamepad; } XiState;
+typedef DWORD (WINAPI *XiGetState_t)(DWORD, XiState*);
+enum { XIB_UP=0x0001, XIB_DOWN=0x0002, XIB_LEFT=0x0004, XIB_RIGHT=0x0008,
+       XIB_START=0x0010, XIB_BACK=0x0020, XIB_LB=0x0100, XIB_RB=0x0200,
+       XIB_A=0x1000, XIB_B=0x2000, XIB_X=0x4000, XIB_Y=0x8000 };
+
+static XiGetState_t g_xiGetState = nullptr;
+static WORD  g_xiPrevBtn = 0;
+static int   g_navDir = 0;        // latched nav direction (0 none, 1 up, 2 down, 3 left, 4 right)
+static DWORD g_navRepeatAt = 0;   // next auto-repeat tick for the latched direction
+static HWND  g_comboOpen = nullptr;   // a dropdown the controller opened (Up/Down pick, A commits)
+static int   g_comboOrigSel = 0;      // selection before opening, for B (cancel) to restore
+
+static void XInputInit() {
+    const wchar_t* dlls[] = { L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll" };
+    for (const wchar_t* d : dlls) {
+        HMODULE m = LoadLibraryW(d);
+        if (m) { g_xiGetState = (XiGetState_t)GetProcAddress(m, "XInputGetState");
+                 if (g_xiGetState) return; }
+    }
+}
+
+static bool XiOurForeground() {
+    HWND fg = GetForegroundWindow();
+    if (!fg) return false;
+    DWORD pid = 0; GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
+}
+
+// The top-level window of ours that currently has activation (the main window, or the Settings
+// host while it is modal). Focus stepping and the default-action button resolve against it.
+static HWND XiActiveTop() {
+    HWND a = GetActiveWindow();   // active window on our (foreground) thread
+    return a ? a : g_hMain;
+}
+// TEMP controller debug -> mctde_xinput.log next to the exe. Stripped before release.
+static void XiLog(const std::string& s) {
+    HANDLE h = CreateFileW(PathIn(L"mctde_xinput.log").c_str(), FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    std::string line = s + "\r\n"; DWORD wr;
+    WriteFile(h, line.data(), (DWORD)line.size(), &wr, nullptr); CloseHandle(h);
+}
+static std::string XiFocusDesc() {
+    HWND f = GetFocus();
+    if (!f) return "<none>";
+    wchar_t cls[32] = {0}; GetClassNameW(f, cls, 32);
+    wchar_t txt[48] = {0}; GetWindowTextW(f, txt, 48);
+    char buf[128]; wsprintfA(buf, "id=%d cls=%S '%S'", GetDlgCtrlID(f),
+                             cls, (txt[0] ? txt : L""));
+    return buf;
+}
+
+// Collect the focusable controls under a window (any depth). We do our own walk + SetFocus rather
+// than GetNextDlgTabItem / synthesised Tab, because the launcher's controls are created WITHOUT
+// WS_TABSTOP, so the dialog manager's tab traversal finds nothing. SetFocus works regardless.
+static BOOL CALLBACK XiCollectProc(HWND h, LPARAM lp) {
+    if (!IsWindowVisible(h) || !IsWindowEnabled(h)) return TRUE;
+    wchar_t cls[32] = {0}; GetClassNameW(h, cls, 32);
+    if (_wcsicmp(cls, L"Button") == 0 || _wcsicmp(cls, L"ComboBox") == 0 ||
+        _wcsicmp(cls, L"Edit")   == 0 || _wcsicmp(cls, L"msctls_trackbar32") == 0 ||
+        _wcsicmp(cls, L"ListBox") == 0)
+        ((std::vector<HWND>*)lp)->push_back(h);
+    return TRUE;
+}
+// Spatial (TV/console-style) 4-direction navigation for the Settings window (and any window without
+// a hand-authored map): move focus to the nearest focusable control in the pressed direction, so
+// Up/Down/Left/Right all follow the visual layout without a per-control map.
+// Scroll the Settings panel (if the control lives in one) so a newly-focused control is on-screen.
+static void XiEnsureVisible(HWND ctl) {
+    if (!ctl) return;
+    HWND panel = GetParent(ctl);
+    bool isDs = (panel == g_setDsPanel), isMc = (M.view && panel == M.view);
+    if (!isDs && !isMc) return;                      // tabs / Save / Cancel don't scroll
+    RECT cr, pr; GetWindowRect(ctl, &cr); GetWindowRect(panel, &pr);
+    int relTop = cr.top - pr.top, relBot = cr.bottom - pr.top, viewH = pr.bottom - pr.top;
+    const int MARGIN = 14;
+    int pos = isDs ? g_dsScroll : g_mcScroll;
+    if (relTop < MARGIN)              pos += relTop - MARGIN;
+    else if (relBot > viewH - MARGIN) pos += relBot - (viewH - MARGIN);
+    else return;                                     // already fully visible
+    if (pos < 0) pos = 0;
+    if (isDs) DsfixScrollTo(panel, pos); else McScrollTo(pos);
+}
+// Put focus on the top-left-most focusable control inside a panel (used when a Settings tab opens,
+// so navigation starts on the first field rather than the tab strip or an unfocusable panel window).
+static void XiFocusFirstIn(HWND panel) {
+    if (!panel) return;
+    std::vector<HWND> v;
+    EnumChildWindows(panel, XiCollectProc, (LPARAM)&v);
+    if (v.empty()) { SetFocus(panel); return; }
+    HWND best = v[0]; RECT br; GetWindowRect(best, &br);
+    for (HWND h : v) { RECT r; GetWindowRect(h, &r);
+        if (r.top < br.top - 8 || (r.top <= br.top + 8 && r.left < br.left)) { best = h; br = r; } }
+    SetFocus(best); XiEnsureVisible(best);
+}
+// Reading-order grid navigation for the Settings window (and any window without a hand-authored
+// map). Controls are grouped into rows by their vertical centre (ROWTOL tolerance) and ordered
+// left-to-right within a row. Up/Down step to the nearest control in the adjacent row (matched by
+// horizontal centre); Left/Right step to the next control in the SAME row. This moves the way the
+// eye reads the form -- top to bottom, left to right -- instead of jumping to whatever centroid
+// happened to score nearest, which is what made the old spatial nav skip rows unpredictably.
+static void XiSpatialNav(int dir) {   // 0 up, 1 down, 2 left, 3 right
+    HWND top = XiActiveTop();
+    std::vector<HWND> v;
+    EnumChildWindows(top, XiCollectProc, (LPARAM)&v);
+    if (v.empty()) return;
+    struct Item { HWND h; int cx, cy; };
+    std::vector<Item> it; it.reserve(v.size());
+    for (HWND h : v) { RECT r; GetWindowRect(h, &r);
+        it.push_back({ h, (int)(r.left + r.right) / 2, (int)(r.top + r.bottom) / 2 }); }
+    auto iabs = [](int x) { return x < 0 ? -x : x; };
+
+    HWND cur = GetFocus(); int me = -1;
+    for (int i = 0; i < (int)it.size(); ++i) if (it[i].h == cur) { me = i; break; }
+    if (me < 0) {   // nothing focused yet -> land on the top-left-most control
+        int b = 0;
+        for (int i = 1; i < (int)it.size(); ++i)
+            if (it[i].cy < it[b].cy - 8 || (iabs(it[i].cy - it[b].cy) <= 8 && it[i].cx < it[b].cx)) b = i;
+        SetFocus(it[b].h); XiEnsureVisible(it[b].h); return;
+    }
+    const int ROWTOL = 14;
+    int mcx = it[me].cx, mcy = it[me].cy, best = -1;
+    if (dir == 2 || dir == 3) {                          // nearest control in the same row, that side
+        for (int i = 0; i < (int)it.size(); ++i) {
+            if (i == me || iabs(it[i].cy - mcy) > ROWTOL) continue;
+            bool side = (dir == 3) ? it[i].cx > mcx : it[i].cx < mcx;
+            if (side && (best < 0 || iabs(it[i].cx - mcx) < iabs(it[best].cx - mcx))) best = i;
+        }
+    } else {                                             // closest adjacent row, nearest by x
+        int tcy = 0; bool found = false;
+        for (auto& x : it) {
+            if (dir == 1 && x.cy > mcy + ROWTOL) { if (!found || x.cy < tcy) { tcy = x.cy; found = true; } }
+            if (dir == 0 && x.cy < mcy - ROWTOL) { if (!found || x.cy > tcy) { tcy = x.cy; found = true; } }
+        }
+        if (found)
+            for (int i = 0; i < (int)it.size(); ++i)
+                if (iabs(it[i].cy - tcy) <= ROWTOL &&
+                    (best < 0 || iabs(it[i].cx - mcx) < iabs(it[best].cx - mcx))) best = i;
+    }
+    if (best >= 0) { SetFocus(it[best].h); XiEnsureVisible(it[best].h); }
+}
+
+// Explicit D-pad navigation map for the main window: one step per press between named controls,
+// fully reversible (every edge's opposite direction walks back). Laid out as specified: the left
+// column of toggles, into the Changelog -> Settings -> Exit row, then the Auto-Play / Auto-Update /
+// Play / Exit cluster (a little clockwise loop). 0 = no neighbour in that direction.
+struct NavNode { int id, up, down, left, right; };
+static const NavNode kMainNav[] = {
+  //  id,                 up,                 down,               left,               right
+    { IDC_CHK_PHANTOM,     0,                  IDC_CHK_PRACTICE,   0,                  0 },
+    { IDC_CHK_PRACTICE,    IDC_CHK_PHANTOM,    IDC_CHK_DSFIX,      0,                  0 },
+    { IDC_CHK_DSFIX,       IDC_CHK_PRACTICE,   IDC_CHK_DSCM,       0,                  0 },
+    { IDC_CHK_DSCM,        IDC_CHK_DSFIX,      IDC_CHK_DARK,       0,                  0 },
+    { IDC_CHK_DARK,        IDC_CHK_DSCM,       IDC_BTN_CHANGELOG,  0,                  0 },
+    { IDC_BTN_CHANGELOG,   IDC_CHK_DARK,       0,                  0,                  IDC_BTN_MCTDE },
+    { IDC_BTN_MCTDE,       0,                  0,                  IDC_BTN_CHANGELOG,  IDC_BTN_EXIT },
+    { IDC_BTN_EXIT,        IDC_CHK_AUTOPLAY,   0,                  IDC_BTN_MCTDE,      IDC_BTN_PLAY },
+    { IDC_CHK_AUTOPLAY,    0,                  IDC_BTN_EXIT,       0,                  IDC_CHK_AUTOUPDATE },
+    { IDC_CHK_AUTOUPDATE,  0,                  IDC_BTN_PLAY,       IDC_CHK_AUTOPLAY,   0 },
+    { IDC_BTN_PLAY,        IDC_CHK_AUTOUPDATE, 0,                  IDC_BTN_EXIT,       0 },
+};
+// Step one control in a direction on the main window, skipping any control that is hidden or
+// disabled (e.g. DSFix / Practice when not installed) so a press never lands on a dead control.
+static void XiMainNav(int dir) {   // 0 up, 1 down, 2 left, 3 right
+    HWND f = GetFocus();
+    int cur = f ? GetDlgCtrlID(f) : 0;
+    for (int guard = 0; guard < 16; ++guard) {
+        const NavNode* node = nullptr;
+        for (const NavNode& n : kMainNav) if (n.id == cur) { node = &n; break; }
+        if (!node) { HWND h = GetDlgItem(g_hMain, IDC_BTN_PLAY); if (h) SetFocus(h); return; }  // reset to Play
+        int next = (dir == 0) ? node->up : (dir == 1) ? node->down : (dir == 2) ? node->left : node->right;
+        if (!next) return;                       // edge of the map in this direction -> stay put
+        HWND h = GetDlgItem(g_hMain, next);
+        if (h && IsWindowVisible(h) && IsWindowEnabled(h)) { SetFocus(h); return; }
+        cur = next;                              // skip a hidden/disabled control, keep walking
+    }
+}
+
+// One directional press. The main window uses the explicit map. Everywhere else (Settings) uses
+// spatial navigation, except Left/Right on a focused slider, which nudges its value. Dropdowns are
+// navigated by opening them (A) and using Up/Down, so Left/Right stays pure navigation for a combo.
+static void XiNav(int dir) {   // 0 up, 1 down, 2 left, 3 right
+    if (XiActiveTop() == g_hMain) { XiMainNav(dir); return; }
+    if (dir == 2 || dir == 3) {
+        HWND h = GetFocus();
+        wchar_t cls[32] = {0}; if (h) GetClassNameW(h, cls, 32);
+        int delta = (dir == 3) ? 1 : -1;
+        if (h && _wcsicmp(cls, L"msctls_trackbar32") == 0) {
+            int lo = (int)SendMessageW(h, TBM_GETRANGEMIN, 0, 0);
+            int hi = (int)SendMessageW(h, TBM_GETRANGEMAX, 0, 0);
+            int step = max(1, (hi - lo) / 20);
+            int pos = (int)SendMessageW(h, TBM_GETPOS, 0, 0) + delta * step;
+            if (pos < lo) pos = lo; if (pos > hi) pos = hi;
+            SendMessageW(h, TBM_SETPOS, TRUE, pos);
+            SendMessageW(GetParent(h), WM_HSCROLL, MAKEWPARAM(SB_THUMBPOSITION, pos), (LPARAM)h);
+            return;
+        }
+    }
+    XiSpatialNav(dir);
+}
+
+// Drive an open dropdown with the key the keyboard would send, so the combo's own state machine
+// owns the selection: VK_UP/DOWN moves the list highlight (live-previewing the field), VK_RETURN
+// commits the highlighted item, VK_ESCAPE cancels back to the original. This keeps the list caret
+// and the committed value in lockstep -- programmatic CB_SETCURSEL left them out of sync, so a
+// commit reverted to the pre-open value.
+static void XiComboKey(WORD vk) {
+    if (!g_comboOpen) return;
+    SendMessageW(g_comboOpen, WM_KEYDOWN, vk, 0x00000001);
+    SendMessageW(g_comboOpen, WM_KEYUP,   vk, 0xC0000001);
+}
+static void XiComboMove(int dir) { XiComboKey(dir == 0 ? VK_UP : VK_DOWN); }   // 0 up, 1 down
+// Route a directional press: into an open dropdown if one is open, else normal focus navigation.
+static void XiDirAct(int d) {
+    if (g_comboOpen) { if (d == 0 || d == 1) XiComboMove(d); }   // Left/Right do nothing in an open list
+    else XiNav(d);
+}
+
+static void XInputPoll() {
+    if (!g_xiGetState) return;
+    // Probing an empty XInput slot is comparatively costly, so when no pad is connected we only
+    // check ~once a second; once one is present we poll every tick for responsiveness.
+    static bool connected = false;
+    static int  idleTick = 0;
+    if (!connected && (++idleTick % 30) != 0) return;
+    XiState st = {};
+    DWORD rc = g_xiGetState(0, &st);
+    if (rc != 0) {   // ERROR_SUCCESS == 0; nonzero = no pad on port 0
+        connected = false; g_xiConnected = false; g_xiPrevBtn = 0; g_navDir = 0; return;
+    }
+    connected = true; g_xiConnected = true;
+    if (!XiOurForeground()) {            // never drive the game or another app
+        g_xiPrevBtn = st.Gamepad.wButtons; g_navDir = 0; return;
+    }
+    const WORD b = st.Gamepad.wButtons;
+    const WORD pressed = (WORD)(b & ~g_xiPrevBtn);   // rising edges this poll
+
+    // Any controller input cancels the Auto-Play countdown, and is swallowed so the same press
+    // doesn't also navigate.
+    if (g_autoActive && (b != 0 ||
+        st.Gamepad.sThumbLX > 16000 || st.Gamepad.sThumbLX < -16000 ||
+        st.Gamepad.sThumbLY > 16000 || st.Gamepad.sThumbLY < -16000)) {
+        CancelAutoPlay(); g_xiPrevBtn = b; return;
+    }
+
+    // Directional nav from the d-pad OR the left stick, with keyboard-style auto-repeat.
+    const SHORT DZ = 16000;
+    bool dir[4] = {
+        (b & XIB_UP)    || st.Gamepad.sThumbLY >  DZ,
+        (b & XIB_DOWN)  || st.Gamepad.sThumbLY < -DZ,
+        (b & XIB_LEFT)  || st.Gamepad.sThumbLX < -DZ,
+        (b & XIB_RIGHT) || st.Gamepad.sThumbLX >  DZ,
+    };
+    // Single-direction latch: latch only a CLEAN one-axis press, repeat it while held, and keep the
+    // latch until the stick/d-pad returns to neutral. A d-pad press often smears into a diagonal
+    // (two axes at once); latching the first clean axis and ignoring the smear stops the erratic,
+    // wrong-direction navigation.
+    if (g_comboOpen && !SendMessageW(g_comboOpen, CB_GETDROPPEDSTATE, 0, 0)) g_comboOpen = nullptr;  // closed elsewhere
+
+    DWORD now = GetTickCount();
+    int active = (dir[0]?1:0) + (dir[1]?1:0) + (dir[2]?1:0) + (dir[3]?1:0);
+    { static int lastA = -1; static WORD lastDp = 0xFFFF;
+      if (active != lastA || (WORD)(b & 0x000F) != lastDp) { lastA = active; lastDp = (WORD)(b & 0x000F);
+        char buf[184]; wsprintfA(buf, "dpad btn=0x%04X lx=%d ly=%d U%dD%dL%dR%d active=%d latch=%d combo=%d",
+            b, (int)st.Gamepad.sThumbLX, (int)st.Gamepad.sThumbLY, dir[0], dir[1], dir[2], dir[3], active, g_navDir, g_comboOpen?1:0);
+        XiLog(buf); } }
+    if (active == 0) {
+        g_navDir = 0;                                    // released -> ready for the next press
+    } else if (g_navDir == 0) {
+        if (active == 1) {                               // latch a clean single direction
+            int d = dir[0] ? 0 : dir[1] ? 1 : dir[2] ? 2 : 3;
+            g_navDir = d + 1; XiDirAct(d); g_navRepeatAt = now + 420;
+            XiLog(std::string("  latch d=") + std::to_string(d) + " -> " + XiFocusDesc());
+        }                                                // ambiguous diagonal -> latch nothing yet
+    } else if (dir[g_navDir - 1]) {                      // still holding the latched axis -> repeat
+        if ((int)(now - g_navRepeatAt) >= 0) { XiDirAct(g_navDir - 1); g_navRepeatAt = now + 170;
+            XiLog(std::string("  repeat d=") + std::to_string(g_navDir - 1) + " -> " + XiFocusDesc()); }
+    }
+
+    // A: open a focused dropdown; commit an open one; else click the focused button.
+    if (pressed & XIB_A) {
+        XiLog(std::string("A on ") + XiFocusDesc() + (g_comboOpen ? " [combo open]" : ""));
+        if (g_comboOpen) { XiComboKey(VK_RETURN); g_comboOpen = nullptr; }  // commit the highlighted item
+        else {
+            HWND f = GetFocus(); wchar_t c[32] = {0}; if (f) GetClassNameW(f, c, 32);
+            if (f && _wcsicmp(c, L"Button") == 0) SendMessageW(f, BM_CLICK, 0, 0);
+            else if (f && _wcsicmp(c, L"ComboBox") == 0) {
+                g_comboOpen = f; g_comboOrigSel = (int)SendMessageW(f, CB_GETCURSEL, 0, 0);
+                SendMessageW(f, CB_SHOWDROPDOWN, TRUE, 0);
+            }
+        }
+    }
+    // B: cancel an open dropdown (Escape reverts to the original), else close the dialog.
+    if (pressed & XIB_B) {
+        if (g_comboOpen) {
+            XiComboKey(VK_ESCAPE); g_comboOpen = nullptr;
+        } else {
+            HWND top = XiActiveTop();
+            if (top && top != g_hMain) SendMessageW(top, WM_CLOSE, 0, 0);
+        }
+    }
+    if (!g_comboOpen) {   // Start / shoulders are suspended while a dropdown is open
+        if (pressed & XIB_START) {
+            HWND top = XiActiveTop();
+            if (top == g_hMain)                     PostMessageW(g_hMain, WM_COMMAND, IDC_BTN_PLAY, 0);
+            else if (g_setHost && top == g_setHost) PostMessageW(g_setHost, WM_COMMAND, IDC_SET_SAVE, 0);
+        }
+        if ((pressed & XIB_LB) && g_setHost) PostMessageW(g_setHost, WM_COMMAND, IDC_SET_TAB_DS, 0);
+        if ((pressed & XIB_RB) && g_setHost) PostMessageW(g_setHost, WM_COMMAND, IDC_SET_TAB_MC, 0);
+    }
+
+    g_xiPrevBtn = b;
+}
+
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     LRESULT _tr = 0;
     if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
@@ -3370,12 +4094,12 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 120, 288, 22,
             hWnd, (HMENU)IDC_CHK_PHANTOM, g_inst, nullptr);
         g_chkPractice = CreateWindowW(L"BUTTON", L"Eloise's PTDE Practice Tool",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 160, 200, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 160, 260, 22,
             hWnd, (HMENU)IDC_CHK_PRACTICE, g_inst, nullptr);
         // DSFix enable checkbox. (Its config now lives on the DSFix tab of the Settings window,
         // so there's no separate "Config" button here anymore.)
         g_chkDsfix = CreateWindowW(L"BUTTON", L"DSFix",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 200, 64, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 200, 130, 22,
             hWnd, (HMENU)IDC_CHK_DSFIX, g_inst, nullptr);
         // Auto-Launch DSCM (Dark Souls Connectivity Mod). Greyed as "Searching for DSCM..."
         // until DSCM.exe is found in the DATA folder (or copied in from a running instance).
@@ -3393,11 +4117,15 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             hWnd, nullptr, g_inst, nullptr);
         // Auto-Update checkbox, left-aligned with the PLAY button below it.
         g_chkAutoUpdate = CreateWindowW(L"BUTTON", L"Auto-Update",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 404, 272, 110, 20,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 404, 272, 120, 20,
             hWnd, (HMENU)IDC_CHK_AUTOUPDATE, g_inst, nullptr);
         g_chkDark = CreateWindowW(L"BUTTON", L"Dark Mode",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 274, 120, 20,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 274, 160, 20,
             hWnd, (HMENU)IDC_CHK_DARK, g_inst, nullptr);
+        // Auto-Play: when ticked, the launcher counts down from 5 and starts the game by itself.
+        g_chkAutoPlay = CreateWindowW(L"BUTTON", L"Auto-Play",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 300, 272, 100, 20,
+            hWnd, (HMENU)IDC_CHK_AUTOPLAY, g_inst, nullptr);
         HWND chlog = CreateWindowW(L"BUTTON", L"Changelog",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 16, 300, 100, 30,
             hWnd, (HMENU)IDC_BTN_CHANGELOG, g_inst, nullptr);
@@ -3407,16 +4135,27 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         HWND play = CreateWindowW(L"BUTTON", L"PLAY",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW, 404, 296, 100, 40,
             hWnd, (HMENU)IDC_BTN_PLAY, g_inst, nullptr);
+        g_btnPlay = play;
 
         for (HWND h : { btnMctde, g_chkPhantom, g_chkDsfix, g_chkPractice, g_chkDscm,
-                        g_chkAutoUpdate, g_chkDark, g_lblVersion, g_lblClock, chlog, exit, play })
+                        g_chkAutoUpdate, g_chkAutoPlay, g_chkDark, g_lblVersion, g_lblClock, chlog, exit, play })
             SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        for (HWND c : { g_chkPhantom, g_chkDsfix, g_chkPractice, g_chkDscm,
+                        g_chkAutoUpdate, g_chkAutoPlay, g_chkDark })
+            MakeToggle(c);   // render the main-window checkboxes as slide switches
 
         SendMessageW(g_chkAutoUpdate, BM_SETCHECK, AutoUpdateEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(g_chkAutoPlay,  BM_SETCHECK, AutoPlayEnabled()  ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(g_chkDark, BM_SETCHECK, g_dark ? BST_CHECKED : BST_UNCHECKED, 0);
         SetVersionLabel(hWnd);   // installed versions immediately; refreshed when latest.txt lands
         SetClockLabel();         // show the time at once, then tick it every second
         SetTimer(hWnd, IDT_CLOCK, 1000, nullptr);
+        // Controller navigation: load XInput, poll the pad ~30x/sec, show focus cues, start on PLAY.
+        g_glyphStyle = ReadGlyphStyle();
+        XInputInit();
+        SetTimer(hWnd, IDT_XINPUT, 33, nullptr);
+        SendMessageW(hWnd, WM_CHANGEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS | UISF_HIDEACCEL), 0);
+        SetFocus(play);
         if (HANDLE ut = CreateThread(NULL, 0, UpdateThread, hWnd, 0, NULL)) CloseHandle(ut);
 
         // initial state from disk
@@ -3459,6 +4198,8 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
     case WM_TIMER:
+        if (wParam == IDT_XINPUT) { XInputPoll(); return 0; }
+        if (wParam == IDT_AUTOPLAY) { AutoPlayTick(hWnd); return 0; }
         if (wParam == IDT_DSCM_POLL) {
             if (!g_dscmReady) RefreshDscmRow(hWnd);
             if (g_dscmReady) KillTimer(hWnd, IDT_DSCM_POLL);
@@ -3477,6 +4218,11 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
         break;
+    case WM_KEYDOWN:
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+        CancelAutoPlay();   // any key or click stops the auto-launch countdown
+        break;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
@@ -3491,13 +4237,21 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         RepaintOverBg(g_lblVersion);   // clear any ghost of the old (shorter) version text
         return 0;
     case WM_COMMAND: {
+        bool wasCountingDown = g_autoActive;   // if the PLAY button was showing "STOP (n)"
+        CancelAutoPlay();   // any button/checkbox interaction stops the auto-launch countdown
         // Checkboxes paint transparently over the banner; clear ghosts behind the toggled box.
         if (BgActive(hWnd) && lParam && HIWORD(wParam) == BN_CLICKED)
             RepaintOverBg((HWND)lParam);
         switch (LOWORD(wParam)) {
-        case IDC_BTN_MCTDE:     OpenSettings(hWnd, 0); return 0;
+        case IDC_BTN_MCTDE:
+            OpenSettings(hWnd, 0);
+            g_glyphStyle = ReadGlyphStyle();   // a changed icon set applies right away
+            InvalidateRect(hWnd, nullptr, TRUE);
+            return 0;
         case IDC_BTN_CHANGELOG: OpenChangelog(hWnd);   return 0;
-        case IDC_BTN_PLAY:      ApplyAnd(hWnd, true);  return 0;
+        case IDC_BTN_PLAY:
+            if (wasCountingDown) return 0;     // it was STOP: countdown cancelled, don't launch
+            ApplyAnd(hWnd, true);  return 0;
         case IDC_BTN_EXIT:      ApplyAnd(hWnd, false); return 0;
         case IDC_CHK_AUTOUPDATE:
             // Persist the toggle immediately, and on enable kick a background mctde-Link update so
@@ -3507,6 +4261,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                 HANDLE t = CreateThread(nullptr, 0, LinkUpdateThread, hWnd, 0, nullptr);
                 if (t) CloseHandle(t);
             }
+            return 0;
+        case IDC_CHK_AUTOPLAY:
+            SetAutoPlay(CtlChecked(g_chkAutoPlay));   // persisted; takes effect on next launch
             return 0;
         case IDC_CHK_DSCM:
             // Ticking the box starts DSCM right away (if it isn't already running).
@@ -3562,7 +4319,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
         DeleteFileW((std::wstring(self) + L".old").c_str());
     }
 
-    g_uiFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    { Gdiplus::GdiplusStartupInput gi; Gdiplus::GdiplusStartup(&g_gdiplusToken, &gi, nullptr); }
+    // Modern UI font (Segoe UI + ClearType) instead of the ancient stock GUI font (Tahoma).
+    g_uiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                           OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_DONTCARE, L"Segoe UI");
+    g_hdrFont = CreateFontW(-12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                            OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_DONTCARE, L"Segoe UI");
     g_dark = DarkModeEnabled();
     ApplyTheme();
     g_artorias = (HBITMAP)LoadImageW(hInst, MAKEINTRESOURCEW(IDB_ARTORIAS), IMAGE_BITMAP,
@@ -3614,12 +4376,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
 
     // One-time heads-up after an upgrade reset the ini to this release's new defaults.
     if (g_iniWasReset)
-        MessageBoxW(hWnd,
-            L"Your mctde settings have been reset to this release's defaults.\n\n"
-            L"This update ships new mctde-link.ini defaults (Hide Soul Counter is now on by "
-            L"default), so your previous mctde-link.ini was overwritten. Open Settings to redo "
-            L"any customisations.",
-            L"mctde settings reset", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(hWnd, L"This update reset your settings to new defaults.",
+                    L"Settings reset", MB_OK | MB_ICONINFORMATION);
+
+    StartAutoPlay(hWnd);   // if Auto-Play is on, begin the 5s countdown (any input cancels it)
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
