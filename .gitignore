@@ -5,3 +5,7 @@ bin/
 *.lib
 *.pdb
 *.ilk
+build/
+dist/*.tar.gz
+dist/*.tar.gz.sha256
+dist/latest.txt
