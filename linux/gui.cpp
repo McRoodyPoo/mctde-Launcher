@@ -9,6 +9,7 @@
 #include "cli.h"
 #include "exe_opener.h"
 #include "gamepad.h"
+#include "kwin_behind.h"
 #include "launch.h"
 #include "pe_version.h"
 #include "settings.h"
@@ -48,6 +49,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -178,6 +180,7 @@ public:
 
         StartUpdateCheck();
         SyncExeOpener();
+        if (getenv("MCTDE_TEST_DSCM_BEHIND")) KeepDscmBehind();   // dev aid: test without a real DSCM
         play_->setFocus();
         SetupController(chlog, settings);
         autoTimer_ = new QTimer(this);
@@ -204,6 +207,12 @@ protected:
         const QPixmap& bg = dark_ ? bgDark_ : bgLight_;
         if (!bg.isNull()) p.drawPixmap(0, 0, bg);
         else p.fillRect(rect(), ThemeFor(dark_).bg);
+    }
+    bool event(QEvent* e) override {
+        if (e->type() == QEvent::WindowDeactivate && dscmGuardUntil_ &&
+            QDateTime::currentMSecsSinceEpoch() < dscmGuardUntil_ && !busy_)
+            QTimer::singleShot(0, this, [this] { ReclaimFocus(); });
+        return QWidget::event(e);
     }
     bool eventFilter(QObject* obj, QEvent* e) override {
         // Any key or click stops the countdown. A press on PLAY itself is handled by its pressed()
@@ -336,14 +345,41 @@ private:
         if (path.empty()) return;
         dscmStarting_ = true;
         SetStatus("Starting DSCM...");
+        KeepDscmBehind();
         RunAsync<launch::Result>(this,
             [this, path] { return launch::LaunchDscm(env_, inst_, path); },
             [this](launch::Result r) {
                 dscmStarting_ = false;
+                if (r.started && !kdeBehind_) ArmDscmBehind();
                 SetStatus(r.started ? "" : "DSCM didn't start", !r.started);
                 if (!r.started) QMessageBox::warning(this, "mctde Launcher", QString::fromStdString(r.error));
                 ResumePendingPlay();
             });
+    }
+
+    // DSCM opens behind the launcher, like on Windows. On KDE a short-lived KWin script does it
+    // (linux/kwin_behind.h), loaded before DSCM starts so it sees DSCM's window appear.
+    void KeepDscmBehind() {
+        kdeBehind_ = getenv("XDG_CURRENT_DESKTOP") && strstr(getenv("XDG_CURRENT_DESKTOP"), "KDE");
+        if (kdeBehind_) std::thread([] { kwin::KeepDscmBehindLauncher(60); }).detach();
+    }
+    // Elsewhere, best effort: for a while after DSCM starts, the FIRST time the launcher loses focus
+    // (DSCM's window appearing), it asks for focus back, retrying for ~1.5 s. Only once, so clicking
+    // DSCM later just works. (Compositors may refuse this without fresh input; KWin does.)
+    void ArmDscmBehind() {
+        dscmGuardUntil_ = QDateTime::currentMSecsSinceEpoch() + 20000;
+        if (!isActiveWindow()) ReclaimFocus();   // DSCM already grabbed it while we waited
+    }
+    void ReclaimFocus() {
+        dscmGuardUntil_ = 0;
+        auto ticks = std::make_shared<int>(0);
+        auto* t = new QTimer(this);
+        connect(t, &QTimer::timeout, this, [this, t, ticks] {
+            if (busy_ || ++*ticks > 10) { t->deleteLater(); return; }   // PLAY took over, or done
+            if (!isActiveWindow()) { raise(); activateWindow(); }
+        });
+        t->start(150);
+        raise(); activateWindow();
     }
 
     // Persist every toggle (same set the Windows launcher writes on PLAY / Exit).
@@ -466,7 +502,7 @@ private:
             if (f.open(QIODevice::ReadOnly)) tb->setMarkdown(QString::fromUtf8(f.readAll()));
             tabs->addTab(tb, title);
         };
-        addTab(":/CHANGELOG.md", "Launcher");
+        addTab(":/CHANGELOG-LINUX.md", "Launcher");   // this (Linux) launcher's own history
         addTab(":/mctde-Link.CHANGELOG.md", "mctde-Link");
         auto* box = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
         connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
@@ -491,6 +527,8 @@ private:
     QPushButton *play_ = nullptr, *exit_ = nullptr;
     QTimer *dscmPoll_ = nullptr, *autoTimer_ = nullptr;
     bool autoActive_ = false, playWasStop_ = false;
+    qint64 dscmGuardUntil_ = 0;   // ArmDscmBehind window (ms since epoch), 0 = off
+    bool kdeBehind_ = false;      // the KWin script handles DSCM-behind
     int autoCount_ = 0;
 };
 

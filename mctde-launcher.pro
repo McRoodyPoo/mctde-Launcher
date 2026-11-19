@@ -16,8 +16,8 @@ INCLUDEPATH += .
 
 SOURCES += \
     core/install.cpp core/caches.cpp core/platform_posix.cpp \
-    linux/gui.cpp linux/cli.cpp linux/steam.cpp linux/launch.cpp linux/vdf.cpp linux/pe_version.cpp linux/update.cpp linux/sha256.cpp linux/settings.cpp linux/exe_opener.cpp linux/gamepad.cpp
+    linux/gui.cpp linux/cli.cpp linux/steam.cpp linux/launch.cpp linux/vdf.cpp linux/pe_version.cpp linux/update.cpp linux/sha256.cpp linux/settings.cpp linux/exe_opener.cpp linux/gamepad.cpp linux/kwin_behind.cpp
 HEADERS += \
     core/install.h core/caches.h core/platform.h \
-    linux/cli.h linux/steam.h linux/launch.h linux/vdf.h linux/pe_version.h linux/update.h linux/sha256.h linux/version.h linux/theme.h linux/settings.h linux/exe_opener.h linux/gamepad.h
+    linux/cli.h linux/steam.h linux/launch.h linux/vdf.h linux/pe_version.h linux/update.h linux/sha256.h linux/version.h linux/theme.h linux/settings.h linux/exe_opener.h linux/gamepad.h linux/kwin_behind.h
 RESOURCES += linux/resources.qrc
