@@ -1,5 +1,13 @@
 # mctde-Launcher Changelog
 
+## v0.6.0: OneRelease
+
+- One release for Windows and Linux: every launcher release now carries `mctde-launcher-windows.zip` (the exe plus README, changelog and license) and `mctde-launcher-linux.zip`. Auto-Update downloads the zip for your OS; the Windows launcher takes the exe out of the Windows zip (falling back to the bare exe on older releases).
+- Auto-Play: tick it next to Auto-Update and the launcher counts down from 5 and starts the game. While it counts, PLAY reads "STOP (5)"; pressing it (or any key or click) cancels.
+- Controller support: a connected XInput controller drives the launcher and Settings, with Xbox, PlayStation or Switch button icons on the focused control.
+- New look: checkboxes are toggle switches, dropdowns are flat with a chevron, and buttons, borders and accents follow a refreshed light and dark palette (smooth, anti-aliased drawing via GDI+).
+- mctde-Link updates read `d3d9.dll` out of `mctde-Link.zip`, since Link releases from 0.4.7 on ship no standalone dll.
+
 ## v0.5.4: CleanSlate
 
 - Hide Soul Counter is now on by default: the bottom-right soul display is hidden out of the box (box, icon, number, and the "+N" popup). Untick "Hide soul counter" in Settings > mctde to show it again.

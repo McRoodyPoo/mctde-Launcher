@@ -78,11 +78,12 @@ With **Auto-Update** ticked (the default), the launcher checks for updates each 
 
 - **mctde-Link** (`d3d9.dll`) is updated from mctde-Link's latest release, the same as on Windows.
   A missing `d3d9.dll` is always re-downloaded.
-- **The Linux launcher** updates itself from the Linux release listed on the `linux` branch, checks
-  the download's SHA-256, swaps in the new version and reopens.
+- **The Linux launcher** updates itself from the latest launcher release (the same release as the
+  Windows launcher; it takes `mctde-launcher-linux.zip`), checks the download's SHA-256 against the
+  published checksum, swaps in the new version and reopens.
 
 You can also run `./mctde-launcher update` (or `update --check` to only look). Downloads use your
-system's `curl`. Unpacking mctde-Link uses `unzip`, `bsdtar` or `python3`, whichever you have
+system's `curl`. Unpacking the zips uses `unzip`, `bsdtar` or `python3`, whichever you have
 (SteamOS has them).
 
 ## Command line

@@ -24,17 +24,18 @@ extern char** environ;
 
 namespace update {
 
+// One manifest for everything: mctde-Link's main/latest.txt. mctde-launcher= is the launcher version
+// shared by Windows and Linux, mctde-link= the Link version.
 static const char* LINK_MANIFEST_URL  = "https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/main/latest.txt";
-// The full refs/heads/ form on purpose: GitHub's raw CDN was seen serving the short "/linux/" path
-// stale for well past its 5-minute max-age after a push (query strings don't bust it), while the
-// refs/heads/ path was already current.
-static const char* LINUX_MANIFEST_URL = "https://raw.githubusercontent.com/McRoodyPoo/mctde-Launcher/refs/heads/linux/latest.txt";
 static const char* LINK_ZIP_URL       = "https://github.com/McRoodyPoo/mctde-Link/releases/latest/download/mctde-Link.zip";
-// Launcher archives may only come from this repo's release assets.
+// Launcher archives may only come from this repo's release assets. Each version's release (tagged
+// v<version>) carries mctde-launcher-windows.zip and mctde-launcher-linux.zip, each with a .sha256.
 static const char* RELEASE_URL_PREFIX = "https://github.com/McRoodyPoo/mctde-Launcher/releases/download/";
+static const char* LINUX_ZIP_NAME     = "mctde-launcher-linux.zip";
 
-// Testing hook: MCTDE_UPDATE_MANIFEST_URL points the Linux manifest elsewhere (e.g. file:///tmp/x.txt)
-// and then also lets the archive URL be a file:// URL. Never set in normal use.
+// Testing hook: MCTDE_UPDATE_MANIFEST_URL replaces latest.txt (e.g. file:///tmp/x.txt). Such a manifest
+// may also name the archive directly (mctde-launcher-linux-url=, may be file://) and its checksum
+// (mctde-launcher-linux-sha256=). Never set in normal use.
 static const char* TestManifest() { const char* v = getenv("MCTDE_UPDATE_MANIFEST_URL"); return (v && *v) ? v : nullptr; }
 
 // ---------------------------------------------------------------- process helpers
@@ -100,18 +101,38 @@ bool Check::LauncherOutdated() const {
     return linuxOk && release.Valid() && mctde::CompareVersions(release.version, MCTDE_LINUX_VERSION) > 0;
 }
 
+// First whitespace-separated token of a "<hex>  <file>" sha256sum line, lowercased.
+static std::string FirstToken(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_first_of(" \t\r\n", a);
+    std::string t = s.substr(a, b == std::string::npos ? std::string::npos : b - a);
+    for (auto& ch : t) ch = (char)tolower((unsigned char)ch);
+    return t;
+}
+
 Check Fetch(const mctde::Install& inst) {
     Check c;
     c.installedLink = PeFileVersion(inst.Path("d3d9.dll"));
     std::string body;
-    if (HttpGet(LINK_MANIFEST_URL, body)) { c.linkOk = true; c.latestLink = mctde::ParseKv(body, "mctde-link"); }
-    if (HttpGet(TestManifest() ? TestManifest() : LINUX_MANIFEST_URL, body)) {
-        c.linuxOk = true;
-        c.release.version = mctde::ParseKv(body, "mctde-launcher-linux");
-        c.release.url     = mctde::ParseKv(body, "mctde-launcher-linux-url");
-        c.release.sha256  = mctde::ParseKv(body, "mctde-launcher-linux-sha256");
-        for (auto& ch : c.release.sha256) ch = (char)tolower((unsigned char)ch);
+    if (!HttpGet(TestManifest() ? TestManifest() : LINK_MANIFEST_URL, body)) return c;
+    c.linkOk = true;
+    c.latestLink = mctde::ParseKv(body, "mctde-link");
+
+    // The launcher: this OS's zip from the release named by the shared version, checked against the
+    // .sha256 published next to it.
+    c.release.version = mctde::ParseKv(body, "mctde-launcher");
+    if (c.release.version.empty()) return c;
+    c.release.url = RELEASE_URL_PREFIX + std::string("v") + c.release.version + "/" + LINUX_ZIP_NAME;
+    if (TestManifest()) {
+        std::string u = mctde::ParseKv(body, "mctde-launcher-linux-url");
+        if (!u.empty()) c.release.url = u;
+        c.release.sha256 = FirstToken(mctde::ParseKv(body, "mctde-launcher-linux-sha256"));
     }
+    std::string sidecar;
+    if (c.release.sha256.empty() && HttpGet(c.release.url + ".sha256", sidecar))
+        c.release.sha256 = FirstToken(sidecar);
+    c.linuxOk = c.release.Valid();
     return c;
 }
 
@@ -182,19 +203,6 @@ static bool IsElf(const std::string& p) {
 static void RemoveTree(const std::string& dir) {
     RunProcess({ "rm", "-rf", "--", dir }, nullptr);
 }
-// The single top-level folder an archive extracted into (or dir itself if files sit at the root).
-static std::string PackageRoot(const std::string& dir) {
-    std::string only; int count = 0;
-    if (DIR* d = opendir(dir.c_str())) {
-        while (dirent* e = readdir(d)) {
-            if (e->d_name[0] == '.') continue;
-            ++count; only = dir + "/" + e->d_name;
-        }
-        closedir(d);
-    }
-    struct stat st;
-    return (count == 1 && stat(only.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) ? only : dir;
-}
 
 bool UpdateLauncher(const LinuxRelease& rel, const std::string& exeDir, std::string& err) {
     if (!rel.Valid()) { err = "The Linux update manifest is incomplete or points outside the mctde-Launcher releases."; return false; }
@@ -208,18 +216,16 @@ bool UpdateLauncher(const LinuxRelease& rel, const std::string& exeDir, std::str
     }
     auto fail = [&](const std::string& m) { RemoveTree(work); err = m; return false; };
 
-    const std::string pkg = work + "/pkg.tar.gz";
+    const std::string pkg = work + "/pkg.zip";
     if (!Download(rel.url, pkg)) return fail("Couldn't download the launcher update.");
     std::string got = Sha256FileHex(pkg);
     if (got != rel.sha256) return fail("The launcher update failed its checksum (expected " + rel.sha256 + ", got " + got + ").");
-    if (RunProcess({ "tar", "-xzf", pkg, "-C", work + "/x", "--no-same-owner", "--no-same-permissions" }, nullptr) != 0)
-        return fail("Couldn't unpack the launcher update.");
 
-    const std::string root = PackageRoot(work + "/x");
+    const std::string root = work + "/x";
     std::vector<std::string> present;
     for (const char* n : names) {
         std::string src = root + "/" + n;
-        if (access(src.c_str(), F_OK) != 0) continue;
+        if (!ExtractFromZip(pkg, n, src)) continue;
         if (!IsElf(src)) return fail(std::string("The update's ") + n + " isn't a Linux program.");
         present.push_back(n);
     }

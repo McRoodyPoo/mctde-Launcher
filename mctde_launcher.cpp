@@ -44,9 +44,9 @@
 #define WM_CHANGELOG_READY (WM_APP + 1)
 #define WM_VERSIONS_READY  (WM_APP + 2)
 
-// This launcher's own version. Bump on each launcher release and keep latest.txt's
-// mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.5.4";
+// This launcher's own version, shared with the Linux launcher (linux/version.h). Bump both on each
+// launcher release and keep latest.txt's mctde-launcher= line in sync, or self-update can loop.
+static const char* LAUNCHER_VERSION = "0.6.0";
 
 // Bump this whenever a release must force-reset mctde-link.ini to the documented defaults (e.g. a
 // changed default like Hide Soul Counter now on). On launch, if the ini's [Launcher] ConfigVersion
@@ -3690,6 +3690,27 @@ static bool UpdateLink() {
     return MoveFileExW(tmp.c_str(), PathIn(L"d3d9.dll").c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
 }
 
+// The new launcher exe, from mctde-launcher-windows.zip on the latest release (each release carries
+// one zip per OS; this is the Windows build, so it takes the Windows zip). Falls back to the bare
+// mctde_launcher.exe asset that releases before 0.6.0 carried.
+static bool DownloadNewLauncher(const std::wstring& outFile) {
+    std::string zip;
+    std::vector<uint8_t> exe;
+    if (HttpsGet(L"github.com", L"/McRoodyPoo/mctde-Launcher/releases/latest/download/mctde-launcher-windows.zip", zip) &&
+        minizip::ExtractByName(zip, "mctde_launcher.exe", exe) &&   // CRC-checked
+        exe.size() >= 1024 && exe[0] == 'M' && exe[1] == 'Z') {
+        std::ofstream o(outFile.c_str(), std::ios::binary | std::ios::trunc);
+        if (!o.is_open()) return false;
+        o.write((const char*)exe.data(), (std::streamsize)exe.size());
+        if (o.good()) return true;
+        o.close();
+        DeleteFileW(outFile.c_str());
+        return false;
+    }
+    return DownloadToFile(L"github.com", L"/McRoodyPoo/mctde-Launcher/releases/latest/download/mctde_launcher.exe",
+                          outFile, true);
+}
+
 // Self-update: download the new launcher, rename the running exe aside, move the new one into
 // place, and relaunch. A rename failure rolls back (so a failed update never bricks the exe).
 // Sets MCTDE_SKIP_UPDATE on the child so the relaunched instance can't loop.
@@ -3697,8 +3718,7 @@ static void UpdateLauncherAndRelaunch() {
     wchar_t self[MAX_PATH] = {0};
     GetModuleFileNameW(nullptr, self, MAX_PATH);
     std::wstring selfPath = self, newPath = selfPath + L".new", oldPath = selfPath + L".old";
-    if (!DownloadToFile(L"github.com", L"/McRoodyPoo/mctde-Launcher/releases/latest/download/mctde_launcher.exe",
-                        newPath, true))
+    if (!DownloadNewLauncher(newPath))
         return;
     DeleteFileW(oldPath.c_str());
     if (!MoveFileExW(selfPath.c_str(), oldPath.c_str(), MOVEFILE_REPLACE_EXISTING)) { DeleteFileW(newPath.c_str()); return; }

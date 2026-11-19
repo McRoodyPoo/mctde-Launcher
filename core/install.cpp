@@ -10,7 +10,7 @@
 
 namespace mctde {
 
-const char* const LAUNCHER_VERSION   = "0.5.4";
+const char* const LAUNCHER_VERSION   = "0.6.0";   // == linux/version.h == mctde_launcher.cpp
 const char* const INI_CONFIG_VERSION = "0.5.4";
 const char* const PRACTICE_RELEASE_URL = "https://github.com/helloeloise/ptde_practice_tool/tree/tasrunner";
 

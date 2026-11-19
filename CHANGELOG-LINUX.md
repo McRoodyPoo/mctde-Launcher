@@ -1,6 +1,8 @@
 # mctde-Launcher for Linux Changelog
 
-## Next (unreleased)
+## v0.6.0: OneRelease
+
+- The Linux launcher now shares its version and releases with the Windows launcher: each release carries a Windows zip and a Linux zip, and Auto-Update picks the one for your OS. It reads the version from mctde-Link's `latest.txt` instead of the separate manifest on the `linux` branch, and checks the zip against the SHA-256 published with it.
 
 - DSCM now opens behind the launcher instead of on top of it, like on Windows (KDE Plasma). A short-lived KWin script hands focus back to the launcher when DSCM's window appears; after a few seconds it lets go, so clicking DSCM works as normal.
 - The Changelog's Launcher tab now shows this Linux changelog instead of the Windows launcher's.

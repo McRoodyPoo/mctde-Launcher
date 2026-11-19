@@ -47,16 +47,27 @@ per-user `.exe` opener (`linux/exe_opener.cpp`) so a double-clicked `DARKSOULS.e
 the Linux stand-in for mctde-Link's launcher guard, which can't fire under plain Wine because the game
 quits on `steam_api` before it reaches Direct3D.
 
-**Linux releases / updates.** The Linux launcher has its own version (`linux/version.h`) and update
-manifest: `latest.txt` on the `linux` branch, which names an exact release asset and its SHA-256
-(never `releases/latest`), so Linux releases can't change what the Windows launcher updates to.
-`tools/make_linux_release.sh <version>` builds, packages and writes that `latest.txt`. Publish the
-GitHub pre-release tagged `linux-v<version>` first, then push `latest.txt` to the `linux` branch.
+**Releases / updates.** The Windows and Linux launchers share one version (`LAUNCHER_VERSION` in
+`mctde_launcher.cpp` and `core/install.cpp`, `MCTDE_LINUX_VERSION` in `linux/version.h`) and one
+GitHub release per version, tagged `v<version>`, with a zip per OS:
+
+| Asset | Contents |
+|---|---|
+| `mctde-launcher-windows.zip` | `mctde_launcher.exe`, README.md, CHANGELOG.md, LICENSE |
+| `mctde-launcher-linux.zip` | `mctde-launcher`, `mctde-launcher-cli`, README-LINUX.md, CHANGELOG-LINUX.md, LICENSE |
+| `*.sha256` | SHA-256 of each file (the Linux updater refuses a zip that doesn't match) |
+| `mctde_launcher.exe`, `mctde-launcher-linux-<ver>.tar.gz` | bare files for pre-0.6.0 launchers, older installers and mctde-Link's install prompt |
+
+Both launchers read `mctde-launcher=` from mctde-Link's `latest.txt` and take the zip for the OS they
+run on. To release: bump the three version constants, build `bin/mctde_launcher.exe` with
+`build_launcher.bat`, then run `tools/package_release.sh <version>` (it builds the Linux side itself),
+which writes `dist/v<version>/` and prints the remaining steps. The root `latest.txt` is only for Linux
+launchers older than 0.6.0, which read it from the `linux` branch; the script regenerates it.
 
 Build with `./build_linux.sh` (C++17 compiler; the window also needs Qt 6 base dev files /
 `qmake6`). Output: `bin/mctde-launcher` and `bin/mctde-launcher-cli`. `core/` holds the install
 logic ported from the Windows launcher, so both behave the same on the same folder. Player-facing
-docs for the preview are in `dist/README-LINUX.md`.
+Linux docs are in `dist/README-LINUX.md`.
 
 ## Build
 

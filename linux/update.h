@@ -1,14 +1,13 @@
 // linux/update.h -- auto-update for the Linux launcher and mctde-Link.
 //
-// Two manifests, read over HTTPS with the system curl:
-//   * mctde-Link's main/latest.txt (shared with Windows): the mctde-link= version. d3d9.dll is taken
-//     from mctde-Link.zip on mctde-Link's latest release (the asset its in-game updater uses).
-//   * mctde-Launcher's `linux` branch latest.txt (Linux only):
-//         mctde-launcher-linux=0.1.1
-//         mctde-launcher-linux-url=https://github.com/McRoodyPoo/mctde-Launcher/releases/download/<tag>/<file>.tar.gz
-//         mctde-launcher-linux-sha256=<64 hex>
-//     The URL names an exact release asset (never releases/latest), so Linux releases never become the
-//     repo's "latest" that the Windows launcher updates from. The archive must match the SHA-256.
+// One manifest, mctde-Link's main/latest.txt (shared with Windows), read over HTTPS with the system curl:
+//   * mctde-link=<ver>: d3d9.dll is taken from mctde-Link.zip on mctde-Link's latest release (the asset
+//     its in-game updater uses).
+//   * mctde-launcher=<ver>: the launcher version, shared by Windows and Linux. Its release (tagged
+//     v<ver>) carries one zip per OS; this build takes mctde-launcher-linux.zip, which must match the
+//     mctde-launcher-linux.zip.sha256 published next to it.
+// (Launchers before 0.6.0 read a separate manifest on the `linux` branch; tools/package_release.sh
+// still writes it so they can update to this one.)
 #pragma once
 
 #include <string>
@@ -23,9 +22,9 @@ struct LinuxRelease {
 };
 
 struct Check {
-    bool linkOk = false, linuxOk = false;   // each manifest fetched
+    bool linkOk = false, linuxOk = false;   // manifest fetched / launcher release + checksum found
     std::string latestLink;                 // mctde-link= from mctde-Link's latest.txt
-    LinuxRelease release;                   // from the linux branch's latest.txt
+    LinuxRelease release;                   // mctde-launcher= and its Linux zip + checksum
     std::string installedLink;              // d3d9.dll file version ("" if missing)
     bool LinkOutdated() const;
     bool LauncherOutdated() const;
