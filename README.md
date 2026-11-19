@@ -40,7 +40,8 @@ mctde-launcher update [--check]       # update the launcher and mctde-Link now
 mctde-launcher integrate on|off       # double-clicking DARKSOULS.exe opens the launcher
 ```
 
-The window's **Settings** button opens the same DSFix / mctde tabbed Settings window as Windows
+Controllers drive the window like on Windows (`linux/gamepad.cpp`, SDL2 loaded at runtime, so
+there's no build or runtime dependency on it). The window's **Settings** button opens the same DSFix / mctde tabbed Settings window as Windows
 (`linux/settings.cpp`). While `[Launcher] RequireLauncher` is on, the window also registers a
 per-user `.exe` opener (`linux/exe_opener.cpp`) so a double-clicked `DARKSOULS.exe` opens the launcher:
 the Linux stand-in for mctde-Link's launcher guard, which can't fire under plain Wine because the game

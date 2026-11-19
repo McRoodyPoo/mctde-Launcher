@@ -8,6 +8,7 @@
 #include "../core/platform.h"
 #include "cli.h"
 #include "exe_opener.h"
+#include "gamepad.h"
 #include "launch.h"
 #include "pe_version.h"
 #include "settings.h"
@@ -139,7 +140,11 @@ public:
         connect(chlog, &QPushButton::clicked, this, [this] { ShowChangelog(); });
         connect(settings, &QPushButton::clicked, this, [this] {
             CancelAutoPlay();
-            if (OpenSettings(this, inst_, 0)) SyncExeOpener();   // "Require launcher" may have changed
+            if (OpenSettings(this, inst_, 0)) {
+                SyncExeOpener();   // "Require launcher" may have changed
+                g_glyphStyle = GlyphStyleFrom(inst_.Get("Launcher", "ControllerIcons", "Xbox"));   // and the icon set
+                update();
+            }
         });
         connect(exit_, &QPushButton::clicked, this, [this] { SaveSettings(); close(); });
         connect(play_, &QPushButton::clicked, this, [this] {
@@ -174,6 +179,7 @@ public:
         StartUpdateCheck();
         SyncExeOpener();
         play_->setFocus();
+        SetupController(chlog, settings);
         autoTimer_ = new QTimer(this);
         connect(autoTimer_, &QTimer::timeout, this, [this] { AutoPlayTick(); });
         qApp->installEventFilter(this);
@@ -386,6 +392,43 @@ private:
                 SetStatus("Launch failed", true);
                 QMessageBox::critical(this, "mctde Launcher", QString::fromStdString(r.error));
             });
+    }
+
+    // ---- controller (linux/gamepad.h): the Windows launcher's explicit D-pad map for this window
+    // -- the left column of toggles into the Changelog / Settings / Exit row, then the Auto-Play /
+    // Auto-Update / PLAY / Exit loop -- skipping anything hidden or disabled (DSFix / Practice when
+    // not installed). Start presses PLAY; any input during the Auto-Play countdown cancels it.
+    void SetupController(QPushButton* chlog, QPushButton* settings) {
+        g_glyphStyle = GlyphStyleFrom(inst_.Get("Launcher", "ControllerIcons", "Xbox"));
+        struct Node { QWidget *self, *up, *down, *left, *right; };
+        auto nodes = std::make_shared<std::vector<Node>>(std::vector<Node>{
+            { phantom_,    nullptr,     practice_,  nullptr,     nullptr     },
+            { practice_,   phantom_,    dsfix_,     nullptr,     nullptr     },
+            { dsfix_,      practice_,   dscm_,      nullptr,     nullptr     },
+            { dscm_,       dsfix_,      darkBox_,   nullptr,     nullptr     },
+            { darkBox_,    dscm_,       chlog,      nullptr,     nullptr     },
+            { chlog,       darkBox_,    nullptr,    nullptr,     settings    },
+            { settings,    nullptr,     nullptr,    chlog,       exit_       },
+            { exit_,       autoPlay_,   nullptr,    settings,    play_       },
+            { autoPlay_,   nullptr,     exit_,      nullptr,     autoUpdate_ },
+            { autoUpdate_, nullptr,     play_,      autoPlay_,   nullptr     },
+            { play_,       autoUpdate_, nullptr,    exit_,       nullptr     },
+        });
+        auto* nav = new pad::Navigator(this);
+        nav->mainNav = [this, nodes](int dir) {
+            QWidget* cur = QApplication::focusWidget();
+            for (int guard = 0; guard < 16; ++guard) {
+                const Node* n = nullptr;
+                for (const Node& x : *nodes) if (x.self == cur) n = &x;
+                if (!n) { play_->setFocus(Qt::TabFocusReason); return; }   // off the map: back to PLAY
+                QWidget* next = dir == 0 ? n->up : dir == 1 ? n->down : dir == 2 ? n->left : n->right;
+                if (!next) return;                                          // edge of the map
+                if (next->isVisible() && next->isEnabled()) { next->setFocus(Qt::TabFocusReason); return; }
+                cur = next;                                                 // skip a dead control
+            }
+        };
+        nav->onAnyInput = [this] { if (!autoActive_) return false; CancelAutoPlay(); return true; };
+        nav->onStart = [this] { if (!busy_) play_->click(); };
     }
 
     // Keep the desktop's .exe opener (linux/exe_opener.h) in step with [Launcher] RequireLauncher,

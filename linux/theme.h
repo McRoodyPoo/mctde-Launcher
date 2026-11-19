@@ -11,6 +11,7 @@
 #include <QPushButton>
 
 #include <algorithm>
+#include <string>
 
 namespace ui {
 
@@ -37,6 +38,50 @@ inline bool KeyboardFocus(Qt::FocusReason r) {
     return r == Qt::TabFocusReason || r == Qt::BacktabFocusReason || r == Qt::ShortcutFocusReason;
 }
 
+// Controller state for the focus cues (linux/gamepad.h): with a pad connected, the focused control
+// always shows its focus ring plus the controller's "confirm" badge.
+inline bool g_padConnected = false;
+inline int g_glyphStyle = 0;   // [Launcher] ControllerIcons: 0 Xbox, 1 PlayStation, 2 Switch
+inline int GlyphStyleFrom(const std::string& s) {
+    auto eq = [&](const char* b) { return QString::fromStdString(s).compare(b, Qt::CaseInsensitive) == 0; };
+    return eq("PlayStation") ? 1 : eq("Switch") ? 2 : 0;
+}
+// The confirm badge (the Windows launcher's DrawGlyphInto): a gradient disc with a rim and a top
+// sheen, and a white A (Xbox green / Switch grey) or a cross (PlayStation blue).
+inline void DrawGlyph(QPainter& p, QRectF r) {
+    QColor top, bot;
+    switch (g_glyphStyle) {
+        case 1:  top = QColor(96, 138, 222); bot = QColor(44, 82, 168); break;
+        case 2:  top = QColor(74, 80, 92);   bot = QColor(34, 38, 48);  break;
+        default: top = QColor(86, 190, 98);  bot = QColor(34, 122, 52); break;
+    }
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+    QRectF d = r.adjusted(0, 0, -1, -1);
+    QLinearGradient g(0, r.top() - 1, 0, r.bottom() + 1);
+    g.setColorAt(0, top); g.setColorAt(1, bot);
+    p.setPen(QPen(QColor(0, 0, 0, 70), 1.0));
+    p.setBrush(g);
+    p.drawEllipse(d);
+    p.setPen(QPen(QColor(255, 255, 255, 150), 1.2));
+    p.setBrush(Qt::NoBrush);
+    p.drawArc(d.adjusted(1.4, 1.2, -2.4, -2.6), 200 * 16, 140 * 16);   // top-left sheen
+    if (g_glyphStyle == 1) {
+        qreal s = r.width() * 0.24, cx = r.center().x(), cy = r.center().y();
+        QPen pen(Qt::white, std::max(2.0, r.width() * 0.15));
+        pen.setCapStyle(Qt::RoundCap);
+        p.setPen(pen);
+        p.drawLine(QPointF(cx - s, cy - s), QPointF(cx + s, cy + s));
+        p.drawLine(QPointF(cx - s, cy + s), QPointF(cx + s, cy - s));
+    } else {
+        QFont f = p.font(); f.setBold(true); f.setPixelSize(int(r.height() * 0.66));
+        p.setFont(f);
+        p.setPen(Qt::white);
+        p.drawText(r, Qt::AlignCenter, "A");
+    }
+    p.restore();
+}
+
 // A checkbox drawn as a sliding switch + label (the Windows launcher's PaintToggle). It stays a real
 // QCheckBox, so clicks, Space and toggled() behave normally. The switch sits on the left so every
 // row's switch lines up regardless of label length.
@@ -52,7 +97,7 @@ protected:
         Theme t = ThemeFor(g_dark);
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        const bool on = isChecked(), en = isEnabled(), focused = hasFocus() && kbFocus_;
+        const bool on = isChecked(), en = isEnabled(), focused = hasFocus() && (kbFocus_ || g_padConnected);
         const qreal pw = 30, ph = std::min(18, height() - 2), px = 2, py = (height() - ph) / 2.0;
         QColor track = !en ? (g_dark ? QColor(74, 74, 82) : QColor(210, 212, 218))
                      : on  ? t.accent
@@ -78,6 +123,7 @@ protected:
             p.drawText(tr, Qt::AlignLeft | Qt::AlignVCenter,
                        fontMetrics().elidedText(text(), Qt::ElideRight, int(tr.width())));
         }
+        if (focused && g_padConnected) DrawGlyph(p, QRectF(width() - 7 - 22, (height() - 22) / 2.0, 22, 22));
     }
 private:
     bool kbFocus_ = false;
@@ -96,7 +142,7 @@ protected:
         Theme t = ThemeFor(g_dark);
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        const bool pressed = isDown(), focused = hasFocus() && kbFocus_, en = isEnabled();
+        const bool pressed = isDown(), focused = hasFocus() && (kbFocus_ || g_padConnected), en = isEnabled();
         QColor base = primary_ ? t.accent : t.btn;
         QColor top = Lighten(base, primary_ ? 18 : 12), bot = Darken(base, primary_ ? 20 : 12);
         if (pressed) { QColor tmp = top; top = Darken(bot, 6); bot = tmp; }   // inverted = pushed in
@@ -121,6 +167,10 @@ protected:
                      : primary_ ? (g_dark ? QColor(28, 22, 10) : QColor(255, 250, 242))
                      : t.text);
         p.drawText(rect().adjusted(0, pressed ? 1 : 0, 0, pressed ? 1 : 0), Qt::AlignCenter, text());
+        if (focused && g_padConnected) {
+            int sz = std::min(22, height() - 6);
+            DrawGlyph(p, QRectF(width() - 16 - sz / 2.0, (height() - sz) / 2.0, sz, sz));
+        }
     }
 private:
     bool primary_;

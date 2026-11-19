@@ -6,6 +6,7 @@
 #include "settings.h"
 
 #include "../core/platform.h"
+#include "gamepad.h"
 #include "theme.h"
 
 #include <QApplication>
@@ -137,10 +138,12 @@ protected:
         p.setBrush(active ? t.accent : t.btn);
         p.drawRoundedRect(r, 7, 7);
         if (!active) StrokeRound(p, QRectF(rect()), 7, Alpha(t.border, 150), 1);
-        bool focused = hasFocus() && !active;
-        if (focused) StrokeRound(p, QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5), 6, t.accent, 1.8);
+        bool focused = hasFocus();
+        if (focused) StrokeRound(p, QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5), 6,
+                                 active ? (g_dark ? QColor(255, 235, 170) : QColor(255, 255, 255)) : t.accent, 1.8);
         p.setPen(active ? (g_dark ? QColor(28, 22, 10) : QColor(255, 250, 242)) : (focused ? t.accent : t.text));
         p.drawText(rect(), Qt::AlignCenter, text());
+        if (focused && g_padConnected) DrawGlyph(p, QRectF(width() - 13 - 9, (height() - 18) / 2.0, 18, 18));
     }
 };
 
@@ -982,6 +985,7 @@ public:
         const int TABH = 28, TABW = 96, TABX = 12, TABGAP = 2, TABY = SET_PANELY - TABH - 6;
         tabDs_ = new TabButton("DSFix", this); tabDs_->setGeometry(TABX, TABY, TABW, TABH);
         tabMc_ = new TabButton("mctde", this); tabMc_->setGeometry(TABX + TABW + TABGAP, TABY, TABW, TABH);
+        tabDs_->setObjectName("tabDs"); tabMc_->setObjectName("tabMc");   // controller LB / RB
         save_ = new RoundButton("Save", this, true);
         cancel_ = new RoundButton("Cancel", this);
         save_->setDefault(true);
@@ -1025,6 +1029,9 @@ private:
         tabDs_->active = tab == 0; tabMc_->active = tab == 1;
         tabDs_->update(); tabMc_->update();
         ApplySize();
+        // Start on the tab's first field (controller navigation). Deferred: on the first call the
+        // window isn't shown yet and focus set now would be lost to the default button.
+        QTimer::singleShot(0, this, [this, tab] { if (tab_ == tab) pad::FocusFirstIn(Page(tab)); });
     }
 
     // Ask for a window height that fits the active tab's content (a short page doesn't leave a gap

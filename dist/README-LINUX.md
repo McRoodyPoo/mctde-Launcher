@@ -45,6 +45,16 @@ chaining under Advanced Options). The **mctde** tab edits `mctde-link.ini` (over
 padding, HP display with a live preview, then the rest of mctde-Link's settings). Save writes both
 files; Cancel changes nothing. Only the DSFix keys you actually change are rewritten.
 
+## Controller
+
+Any connected controller can drive the launcher, the same way as on Windows. The D-pad or left stick
+moves between controls; **A** presses or toggles, opens a dropdown and picks from it; **B** backs
+out of a dropdown or closes Settings; **Start** presses PLAY (Save in Settings); **LB / RB** switch
+Settings tabs. Any button during the Auto-Play countdown cancels it. The focused control shows the
+confirm button's icon; pick Xbox, PlayStation or Switch icons under Settings > mctde > Controller
+button icons. Needs SDL2 (installed with Steam on most distros); without it the launcher works as
+before, just without the controller.
+
 ## Double-clicking DARKSOULS.exe
 
 On Windows, starting `DARKSOULS.exe` directly reopens the launcher instead. On Linux a double-clicked
