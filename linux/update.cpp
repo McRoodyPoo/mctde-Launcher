@@ -25,7 +25,10 @@ extern char** environ;
 namespace update {
 
 static const char* LINK_MANIFEST_URL  = "https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/main/latest.txt";
-static const char* LINUX_MANIFEST_URL = "https://raw.githubusercontent.com/McRoodyPoo/mctde-Launcher/linux/latest.txt";
+// The full refs/heads/ form on purpose: GitHub's raw CDN was seen serving the short "/linux/" path
+// stale for well past its 5-minute max-age after a push (query strings don't bust it), while the
+// refs/heads/ path was already current.
+static const char* LINUX_MANIFEST_URL = "https://raw.githubusercontent.com/McRoodyPoo/mctde-Launcher/refs/heads/linux/latest.txt";
 static const char* LINK_ZIP_URL       = "https://github.com/McRoodyPoo/mctde-Link/releases/latest/download/mctde-Link.zip";
 // Launcher archives may only come from this repo's release assets.
 static const char* RELEASE_URL_PREFIX = "https://github.com/McRoodyPoo/mctde-Launcher/releases/download/";
