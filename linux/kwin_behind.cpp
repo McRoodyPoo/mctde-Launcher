@@ -99,9 +99,13 @@ bool KeepDscmBehindLauncher(int seconds) {
     Call("unloadScript", { kPlugin });                 // a leftover from a launcher that crashed
     if (Call("loadScript", { path, kPlugin }) != 0) { unlink(path.c_str()); return false; }
     Call("start", {});
-    std::this_thread::sleep_for(std::chrono::seconds(seconds));
-    Call("unloadScript", { kPlugin });
+    // KWin has read the file once the script runs; drop it now so a launcher that exits early
+    // doesn't leave it behind. (A script left loaded that way is harmless -- with no launcher
+    // window it does nothing -- and the next launcher unloads it first.)
+    std::this_thread::sleep_for(std::chrono::seconds(2));
     unlink(path.c_str());
+    std::this_thread::sleep_for(std::chrono::seconds(seconds > 2 ? seconds - 2 : 0));
+    Call("unloadScript", { kPlugin });
     return true;
 }
 
