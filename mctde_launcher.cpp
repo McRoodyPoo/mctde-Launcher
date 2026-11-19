@@ -3469,12 +3469,224 @@ static bool DownloadToFile(const wchar_t* host, const wchar_t* path, const std::
     return o.good();
 }
 
-// Replace the installed d3d9.dll with the latest release build. Safe because the game (which
+// ------------------------------------------------------------ minimal zip reader (mctde-Link.zip)
+// mctde-Link releases ship d3d9.dll inside mctde-Link.zip (since 0.4.7 there's no standalone
+// d3d9.dll asset), so the updater has to unzip. This is self-contained on purpose: the launcher is
+// a static, dependency-free build that also runs under Wine/Proton, where tar.exe / PowerShell /
+// the Shell zip folder aren't available. Supports stored and deflated entries (RFC 1951), checks
+// the entry's CRC-32 and size; no ZIP64, encryption or multi-disk (not needed for release zips).
+namespace minizip {
+
+static uint32_t Crc32(const uint8_t* p, size_t n) {
+    static uint32_t table[256];
+    static bool init = false;
+    if (!init) {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+        init = true;
+    }
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; ++i) c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+
+// ---- inflate (canonical-Huffman decoder, in the style of tinf)
+struct Huff { uint16_t counts[16]; uint16_t symbols[320]; };
+
+struct Inflater {
+    const uint8_t* src; size_t srcLen; size_t pos = 0;
+    uint32_t bitBuf = 0; int bitCnt = 0;
+    std::vector<uint8_t>& out;
+    bool err = false;
+    Inflater(const uint8_t* s, size_t n, std::vector<uint8_t>& o) : src(s), srcLen(n), out(o) {}
+
+    int Bit() {
+        if (bitCnt == 0) {
+            if (pos >= srcLen) { err = true; return 0; }
+            bitBuf = src[pos++]; bitCnt = 8;
+        }
+        int b = bitBuf & 1; bitBuf >>= 1; --bitCnt;
+        return b;
+    }
+    uint32_t Bits(int n) {   // LSB-first
+        uint32_t v = 0;
+        for (int i = 0; i < n; ++i) v |= (uint32_t)Bit() << i;
+        return v;
+    }
+    static bool Build(Huff& h, const uint8_t* lengths, int n) {
+        uint16_t offs[16];
+        memset(h.counts, 0, sizeof(h.counts));
+        for (int i = 0; i < n; ++i) h.counts[lengths[i]]++;
+        h.counts[0] = 0;
+        int left = 1;   // reject over-subscribed codes
+        for (int i = 1; i < 16; ++i) { left <<= 1; left -= h.counts[i]; if (left < 0) return false; }
+        uint16_t sum = 0;
+        for (int i = 0; i < 16; ++i) { offs[i] = sum; sum += h.counts[i]; }
+        for (int i = 0; i < n; ++i) if (lengths[i]) h.symbols[offs[lengths[i]]++] = (uint16_t)i;
+        return true;
+    }
+    int Decode(const Huff& h) {
+        int code = 0, first = 0, index = 0;
+        for (int len = 1; len < 16; ++len) {
+            code |= Bit();
+            int count = h.counts[len];
+            if (code - first < count) return h.symbols[index + code - first];
+            index += count; first += count; first <<= 1; code <<= 1;
+            if (err) return -1;
+        }
+        err = true;
+        return -1;
+    }
+    bool Codes(const Huff& lit, const Huff& dist) {
+        static const uint16_t lenBase[29] = {3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258};
+        static const uint8_t  lenExtra[29] = {0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0};
+        static const uint16_t distBase[30] = {1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577};
+        static const uint8_t  distExtra[30] = {0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13};
+        for (;;) {
+            int sym = Decode(lit);
+            if (err || sym < 0) return false;
+            if (sym < 256) { out.push_back((uint8_t)sym); continue; }
+            if (sym == 256) return true;
+            sym -= 257;
+            if (sym >= 29) return false;
+            size_t len = lenBase[sym] + Bits(lenExtra[sym]);
+            int ds = Decode(dist);
+            if (err || ds < 0 || ds >= 30) return false;
+            size_t d = distBase[ds] + Bits(distExtra[ds]);
+            if (d > out.size()) return false;
+            size_t from = out.size() - d;
+            for (size_t i = 0; i < len; ++i) out.push_back(out[from + i]);
+            if (out.size() > (size_t)256 * 1024 * 1024) return false;   // sanity cap
+        }
+    }
+    bool Stored() {
+        bitBuf = 0; bitCnt = 0;   // align to byte
+        if (pos + 4 > srcLen) return false;
+        uint16_t len = (uint16_t)(src[pos] | src[pos + 1] << 8), nlen = (uint16_t)(src[pos + 2] | src[pos + 3] << 8);
+        pos += 4;
+        if ((uint16_t)~nlen != len || pos + len > srcLen) return false;
+        out.insert(out.end(), src + pos, src + pos + len);
+        pos += len;
+        return true;
+    }
+    bool Fixed() {
+        static Huff lit, dist; static bool built = false;
+        if (!built) {
+            uint8_t l[288];
+            for (int i = 0; i < 144; ++i) l[i] = 8;
+            for (int i = 144; i < 256; ++i) l[i] = 9;
+            for (int i = 256; i < 280; ++i) l[i] = 7;
+            for (int i = 280; i < 288; ++i) l[i] = 8;
+            Build(lit, l, 288);
+            uint8_t d[30]; for (int i = 0; i < 30; ++i) d[i] = 5;
+            Build(dist, d, 30);
+            built = true;
+        }
+        return Codes(lit, dist);
+    }
+    bool Dynamic() {
+        static const uint8_t order[19] = {16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15};
+        int hlit = (int)Bits(5) + 257, hdist = (int)Bits(5) + 1, hclen = (int)Bits(4) + 4;
+        if (hlit > 286 || hdist > 30) return false;
+        uint8_t lengths[320] = {0};
+        for (int i = 0; i < hclen; ++i) lengths[order[i]] = (uint8_t)Bits(3);
+        Huff cl;
+        if (!Build(cl, lengths, 19)) return false;
+        memset(lengths, 0, sizeof(lengths));
+        for (int i = 0; i < hlit + hdist;) {
+            int sym = Decode(cl);
+            if (err || sym < 0) return false;
+            if (sym < 16) { lengths[i++] = (uint8_t)sym; continue; }
+            int rep = 0; uint8_t val = 0;
+            if (sym == 16) { if (i == 0) return false; val = lengths[i - 1]; rep = 3 + (int)Bits(2); }
+            else if (sym == 17) rep = 3 + (int)Bits(3);
+            else rep = 11 + (int)Bits(7);
+            if (i + rep > hlit + hdist) return false;
+            while (rep--) lengths[i++] = val;
+        }
+        if (lengths[256] == 0) return false;
+        Huff lit, dist;
+        if (!Build(lit, lengths, hlit) || !Build(dist, lengths + hlit, hdist)) return false;
+        return Codes(lit, dist);
+    }
+    bool Run() {
+        int last;
+        do {
+            last = Bit();
+            int type = (int)Bits(2);
+            bool ok = type == 0 ? Stored() : type == 1 ? Fixed() : type == 2 ? Dynamic() : false;
+            if (!ok || err) return false;
+        } while (!last);
+        return true;
+    }
+};
+
+static uint16_t U16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
+static uint32_t U32(const uint8_t* p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
+// Extract the first entry whose file name (ignoring any folders in the zip) is `base`,
+// case-insensitive. Returns false if it's missing, damaged, or uses an unsupported method.
+static bool ExtractByName(const std::string& zip, const char* base, std::vector<uint8_t>& out) {
+    const uint8_t* z = (const uint8_t*)zip.data();
+    const size_t n = zip.size();
+    if (n < 22) return false;
+    // End-of-central-directory record: within the last 64 KiB + 22 bytes (trailing comment).
+    size_t eocd = std::string::npos;
+    for (size_t i = n - 22 + 1; i-- > 0 && n - i <= 65557;)
+        if (U32(z + i) == 0x06054b50) { eocd = i; break; }
+    if (eocd == std::string::npos) return false;
+    uint16_t entries = U16(z + eocd + 10);
+    size_t cd = U32(z + eocd + 16);
+    for (uint16_t e = 0; e < entries; ++e) {
+        if (cd + 46 > n || U32(z + cd) != 0x02014b50) return false;
+        uint16_t method = U16(z + cd + 10), flags = U16(z + cd + 8);
+        uint32_t crc = U32(z + cd + 16), csize = U32(z + cd + 20), usize = U32(z + cd + 24);
+        uint16_t nameLen = U16(z + cd + 28), extraLen = U16(z + cd + 30), commentLen = U16(z + cd + 32);
+        size_t local = U32(z + cd + 42);
+        if (cd + 46 + nameLen > n) return false;
+        std::string name((const char*)z + cd + 46, nameLen);
+        cd += 46 + nameLen + extraLen + commentLen;
+        size_t slash = name.find_last_of("/\\");
+        std::string b = slash == std::string::npos ? name : name.substr(slash + 1);
+        if (_stricmp(b.c_str(), base) != 0) continue;
+
+        if ((flags & 1) || local + 30 > n || U32(z + local) != 0x04034b50) return false;   // encrypted / bad header
+        size_t data = local + 30 + U16(z + local + 26) + U16(z + local + 28);
+        if (data + csize > n || usize > (uint32_t)256 * 1024 * 1024) return false;
+        out.clear();
+        out.reserve(usize);
+        if (method == 0) out.assign(z + data, z + data + csize);
+        else if (method == 8) { Inflater inf(z + data, csize, out); if (!inf.Run()) return false; }
+        else return false;
+        return out.size() == usize && Crc32(out.data(), out.size()) == crc;
+    }
+    return false;
+}
+
+} // namespace minizip
+
+// Replace the installed d3d9.dll with the latest mctde-Link release build. Releases ship it inside
+// mctde-Link.zip (the same asset mctde-Link's in-game updater uses; from 0.4.7 on there is no
+// standalone d3d9.dll asset, so fetching releases/latest/download/d3d9.dll 404s). Only d3d9.dll is
+// taken from the zip -- the player's mctde-link.ini is left alone. Safe because the game (which
 // loads d3d9.dll) is not running while the launcher is up, so the file isn't locked.
 static bool UpdateLink() {
-    std::wstring tmp = PathIn(L"d3d9.dll.new");
-    if (!DownloadToFile(L"github.com", L"/McRoodyPoo/mctde-Link/releases/latest/download/d3d9.dll", tmp, true))
+    std::string zip;
+    if (!HttpsGet(L"github.com", L"/McRoodyPoo/mctde-Link/releases/latest/download/mctde-Link.zip", zip))
         return false;
+    std::vector<uint8_t> dll;
+    if (!minizip::ExtractByName(zip, "d3d9.dll", dll)) return false;
+    if (dll.size() < 1024 || dll[0] != 'M' || dll[1] != 'Z') return false;   // must be a PE
+    std::wstring tmp = PathIn(L"d3d9.dll.new");
+    {
+        std::ofstream o(tmp.c_str(), std::ios::binary | std::ios::trunc);
+        if (!o.is_open()) return false;
+        o.write((const char*)dll.data(), (std::streamsize)dll.size());
+        if (!o.good()) { o.close(); DeleteFileW(tmp.c_str()); return false; }
+    }
     return MoveFileExW(tmp.c_str(), PathIn(L"d3d9.dll").c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
 }
 
