@@ -21,13 +21,20 @@ namespace {
 
 const char* const kPlugin = "mctde-dscm-behind";
 
-// Matches DSCM by its Wine window class ("dscm.exe") and the launcher by its Wayland app id /
-// X11 class ("mctde-launcher", from QApplication::setDesktopFileName). DSCM gets a few seconds
-// after its window appears in which taking focus is undone; after that the player's clicks win.
+// Matches DSCM by its window title ("Wulf's Dark Souls Connectivity Mod"). Not by class: under
+// Proton every window in the prefix -- DSCM and the game alike -- has the class steam_app_211420,
+// and the script must never pull focus off the game after PLAY. The launcher is matched by its
+// Wayland app id / X11 class ("mctde-launcher", from QApplication::setDesktopFileName). DSCM gets
+// a few seconds after its window appears in which taking focus is undone; after that the
+// player's clicks win.
 const char* const kScript = R"JS(
 const GRACE_MS = 4000;
 let addedAt = 0;
-function isDscm(w) { return !!w && (w.resourceClass || "").toLowerCase().indexOf("dscm") >= 0; }
+function isDscm(w) {
+    if (!w) return false;
+    const t = (w.caption || "").toLowerCase(), c = (w.resourceClass || "").toLowerCase();
+    return t.indexOf("connectivity mod") >= 0 || t.indexOf("dscm") >= 0 || c.indexOf("dscm") >= 0;
+}
 function launcher() {
     const ws = workspace.windowList();
     for (let i = 0; i < ws.length; ++i)
@@ -35,9 +42,13 @@ function launcher() {
     return null;
 }
 function sink() { const l = launcher(); if (l) workspace.activeWindow = l; }
-workspace.windowAdded.connect(function (w) { if (isDscm(w)) { addedAt = Date.now(); sink(); } });
-workspace.windowActivated.connect(function (w) { if (isDscm(w) && Date.now() - addedAt < GRACE_MS) sink(); });
-if (isDscm(workspace.activeWindow)) { addedAt = Date.now(); sink(); }
+function check(w) { if (isDscm(w) && !addedAt) { addedAt = Date.now(); sink(); } }
+workspace.windowAdded.connect(function (w) {
+    check(w);
+    w.captionChanged.connect(function () { check(w); });   // Wine may title the window after mapping it
+});
+workspace.windowActivated.connect(function (w) { if (isDscm(w) && addedAt && Date.now() - addedAt < GRACE_MS) sink(); });
+check(workspace.activeWindow);
 )JS";
 
 bool OnKde() {
