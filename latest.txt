@@ -1,0 +1,5 @@
+# Linux launcher update manifest -- read only by mctde-launcher on Linux. Lives on the `linux`
+# branch; the Windows launcher reads mctde-Link's main/latest.txt and never sees this file.
+mctde-launcher-linux=0.2.0
+mctde-launcher-linux-url=https://github.com/McRoodyPoo/mctde-Launcher/releases/download/linux-v0.2.0/mctde-launcher-linux-0.2.0.tar.gz
+mctde-launcher-linux-sha256=01429789865d4ccf8090a2b70929cf0a7ce32886613e632a9a42c58ddaa204ce

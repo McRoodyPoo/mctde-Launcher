@@ -1,0 +1,243 @@
+// core/default_ini.inc -- the full, documented default mctde-link.ini (included by install.cpp).
+// SINGLE SOURCE OF TRUTH for a freshly generated config. Keep in sync with
+// samples/mctde-link.sample.ini, and bump INI_CONFIG_VERSION (install.cpp) when defaults change.
+const char* const kDefaultIni =
+R"INI([Settings]
+EnableLogging=0
+; Force a clean process exit when the game window closes, so the overlay's background threads
+; can't leave a lingering "zombie" DARKSOULS.exe behind. Leave at 1 unless it ever exits early.
+ExitWithGame=1
+
+[Launcher]
+; Config schema tag. The launcher force-resets this whole file to the documented defaults whenever
+; this doesn't match the build's expected tag, then rewrites it. Managed by the launcher; don't edit.
+ConfigVersion=0.5.4
+
+; 1 = if the game is started WITHOUT mctde_launcher.exe, close the game and open the launcher
+; instead, so you always go through it. Only enforced when mctde_launcher.exe is present next
+; to the game; set to 0 to allow launching the game directly.
+RequireLauncher=1
+
+; Auto-Update: 1 = on launch, silently self-update the launcher and mctde-Link to the latest GitHub
+; release when a newer one exists (the launcher relaunches itself after updating); 0 = off. Default
+; is 1; untick "Auto-Update" on the launcher to turn it off. A missing core d3d9.dll is always
+; re-fetched regardless of this setting.
+AutoUpdate=1
+
+; Auto-Play: 1 = on launch, count down from 5 and then start the game automatically (any key,
+; click, or controller button cancels the countdown so you can still configure). 0 = off (default).
+; Handy for controller / couch play so you can boot straight into the game past the launcher.
+AutoPlay=0
+
+[PhantomUnleashed]
+; Built-in phantom-cap raiser. Rewrite of Metal-Crow's MultiPhantom/Overhaul patch on
+; mctde-Link's patch engine; offset facts credited to his reverse-engineering work.
+; Mode = Ask | On | Off
+;   Ask = show a Yes/No box every launch (default).
+;   On  = always enable, no prompt.   Off = never enable, no prompt.
+; LINUX / PROTON: the Ask prompt is NOT supported and is skipped (PhantomUnleashed stays off).
+;   You MUST set Mode=On or Mode=Off manually on Proton.
+; IMPORTANT: while enabled you can ONLY connect with other players who also have
+;   PhantomUnleashed enabled. Disabled = vanilla matchmaking with everyone.
+Mode=Ask
+; Total player slots in your world (stock is 4). KEEP THIS AT 18 for a stable >4 session:
+; the Stage 2 offset-shift trampolines are calibrated for 18. Other values (4-32) apply
+; only the Stage 1 cap + pool segregation and will NOT be a stable large session.
+MaxPhantoms=18
+; Matchmaking pool key (1 byte). The game only connects players whose NetworkVersion
+; matches, so this is what segregates you from the vanilla pool. Vanilla retail = 0x2E.
+; Default 0x4D = the PhantomUnleashed pool. ALL players in a session must share the SAME
+; NetworkVersion *and* MaxPhantoms. Accepts hex (0x4D) or decimal (77). Set 0x2E to
+; deliberately rejoin the vanilla pool (no segregation).
+NetworkVersion=0x4D
+; Game internal memory pool, in MB. Stock DS1 allocates only ~10 MB, which is sized for 4
+; players and runs out once many phantoms load their models/gear/animations. Raised so an
+; 18-phantom session has room. Range 0-255 (0 = leave stock). 192 is a safe default.
+MemoryPoolMB=192
+; SAFETY/DIAGNOSTIC: 0 = apply the patches when enabled (normal). 1 = only write the offset
+;   self-check to PhantomUnleashed.log and never modify the game (use if you suspect a bad exe).
+VerifyOnly=0
+
+[HideSoulCounter]
+; Hides the NUMBER on the bottom-right HUD soul counter. The soul icon and the rest of
+; the HUD stay; only the digits stop being drawn. Reversible (reverts on game close).
+; How it works: a single JZ->JMP byte flip in the F20 soul_param widget, located by a
+; signature that is unique in the exe -- so it's safe across relocation. It only forces a
+; code path the game already runs every frame your souls aren't changing.
+; Enabled: 0 = off, 1 = on (default).
+Enabled=1
+; HideGainPopup: also suppress the transient "+N souls gained" popup that flashes on load-in
+;   and when you pick up souls. 1 = hide it too (default), 0 = leave it.
+HideGainPopup=1
+; HideBox: hide the ENTIRE bottom-right soul display -- box/plate + soul icon + number + the
+;   "+N" popup -- leaving the corner empty. Works by clearing the soul dialog's own draw-enable
+;   byte every frame (the soul widget's per-frame update has the dialog object in hand), so the
+;   dialog draws none of its children. Per-object, so no other HUD element or menu is affected;
+;   no DSFix and no texture edits. When 1 it supersedes the number/popup hides above (a hidden
+;   dialog draws neither). 0 = keep the box, hide only the number/popup; 1 = hide all (default).
+HideBox=1
+; HideRegion: the robust way to hide the WHOLE bottom-right soul counter (box + number + popup)
+;   with no DSFix and no texture edits. Link wraps the D3D9 device; when this is on it drops the
+;   game's 2D HUD draws (pre-transformed XYZRHW quads) whose every vertex lands in the bottom-
+;   right rectangle below. No render capture/recomposite, so unlike DSFix HUD Mod it does NOT go
+;   boxy during fades. 0 = off (default), 1 = on. (Your own overlay is drawn separately and is
+;   never affected.)
+HideRegion=0
+; RegionX / RegionY: top-left corner of that kill rectangle, as a fraction of screen width/height
+;   (the rect runs from here to the bottom-right corner). Defaults 0.78 / 0.78 cover the soul
+;   counter only. Raise toward 1.0 to shrink the rect if it clips something else; lower to grow it.
+RegionX=0.78
+RegionY=0.78
+; SAFETY/DIAGNOSTIC: 1 = only write the self-check to HideSoulCounter.log, never modify the
+;   game. Default is 0 so the enabled hide above actually applies; set to 1 to dry-run it.
+VerifyOnly=0
+
+[Controller]
+; First-launch controller helper. We run under Steam appid 480 (Spacewar), whose
+; stock "Official Configuration" doesn't map to a real pad, so controllers look
+; dead until you apply Steam's "Gamepad" template. When enabled, on the first
+; launch that finds a connected controller we pop the Steam binding panel once
+; (Browse Configs -> Templates -> Gamepad), then never again (a marker file
+; records it). Keyboard/mouse users are never nudged.
+; Requires a modern steam_api.dll shipped beside d3d9.dll as BindingNudgeModule
+; (PTDE's own steam_api.dll is too old to open the panel).
+BindingNudge=1
+; Re-show every launch, ignoring the once-done marker (testing only).
+BindingNudgeForce=0
+; Filename of the modern Steam DLL we drive (ships next to d3d9.dll).
+BindingNudgeModule=mctde_input.dll
+; Steam interface version strings. These MUST match the SDK that BindingNudgeModule
+; was built from (its flat wrappers call a vtable slot baked for that version).
+; The shipped mctde_input.dll uses SteamInput002 / SteamClient020 -- only change
+; these if you swap in a different steam_api.dll build.
+BindingNudgeInputVersion=SteamInput002
+BindingNudgeClientVersion=SteamClient020
+; Delay (ms) after overlay start before nudging, so Steam's overlay/input settle.
+BindingNudgeWaitMs=9000
+; How long (ms) to wait for a controller to appear before giving up for this launch.
+BindingNudgeControllerTimeoutMs=6000
+; Optional manual re-trigger key (Windows virtual-key code; 0 = off). Opens the
+; binding panel on demand if the first-launch timing missed. e.g. F10 = 0x79.
+BindingNudgeKey=0
+
+[Compatibility]
+ChainloadFolder=mctde-Link_Chainload
+
+[DLLs]
+GenericDLL0=
+GenericDLL1=
+GenericDLL2=
+GenericDLL3=
+GenericDLL4=
+GenericDLL5=
+GenericDLL6=
+GenericDLL7=
+GenericDLL8=
+GenericDLL9=
+
+[Render]
+; Backend = d3d (in-frame overlay, no stutter; drawn inside d3d9.dll itself --
+;   no companion DLL needed) or gdi (old separate-window fallback).
+; NOTE: the old mctde_overlay.dll companion is obsolete as of 0.1.3. If one is
+;   left over in your ChainloadFolder it is ignored automatically -- you can delete it.
+Backend=d3d
+; How often (ms) the overlay bitmap is refreshed (16-500). 66 = ~15 Hz.
+SubmitMs=66
+; --- gdi-backend-only option (ignored when Backend=d3d) ---
+; GDI-window repaint interval ms (66 = ~15Hz; lower = smoother but more DWM cost).
+RepaintMs=66
+
+[Overlay]
+ShowHeader=1
+MarkerGutterExtra=8
+FontFace=Tahoma
+FontHeight=24
+HpFontHeight=24
+LineHeight=20
+Corner=bottom_right
+PaddingX=5
+PaddingY=97
+UseDsFont=1
+RefreshMs=1000
+HideLocal=0
+ForceTopmost=0
+; --- Master on/off hotkey ---
+; Show/hide the whole overlay. Fires only while the game window is focused.
+; Default is Shift+F3 (ToggleModifier=0x10 Shift, ToggleKey=0x72 F3) to avoid DSFix binds.
+; Values are Windows virtual-key codes, decimal or hex.
+;   Keys:      F3=0x72  F7=0x76  F8=0x77  F9=0x78  H=0x48  Insert=0x2D  ScrollLock=0x91
+;   Modifiers: Shift=0x10  Ctrl=0x11  Alt=0x12  (set ToggleModifier=0 for no modifier)
+ToggleModifier=0x10
+ToggleKey=0x72
+; --- Per-element display toggles (1=show, 0=hide) ---
+; These hide elements without affecting the underlying systems; changes hot-reload ~1s.
+; ShowHp also requires [HP] Enabled=1 (that switch gates HP polling entirely).
+ShowHp=1
+; HpBars: draw each player's HP as a Souls-style filled gauge (green->amber->red as it drops)
+;   instead of a number. 0 = numbers (default), 1 = bars. Needs a readable max HP for that row
+;   (falls back to the number when max HP isn't known, e.g. some remote players).
+HpBars=1
+; HpBarStyle: sub-style used when HpBars=1 (ignored when HpBars=0):
+;   0 = minimal  : plain bar.
+;   1 = damage   : the amount just lost is printed inside the bar in yellow (moves to the right half
+;                  once current HP < half). Numbers linger for DamageLingerMs, same as the chip.
+;   2 = detailed : like damage (yellow amount-lost inside the bar), plus the current HP printed in
+;                  white beside the name (left of the name, or right when the overlay is left-aligned).
+HpBarStyle=1
+ShowPing=1
+ShowName=1
+ShowLocalMarker=1
+; When a player leaves the session WITHOUT dying, keep their row as "Disconnected  ---MS  Name"
+; (greyed out) until a newcomer joins, who then replaces it. Set 0 to just drop the row instead.
+ShowDisconnected=1
+; --- Spacewar controller-setup instructions ---
+; Shows a step-by-step panel for setting up a controller via Steam's Spacewar config.
+; Visible by default (1). Pressing the hide bind (default Shift+F2, while the game window is
+; focused) hides the panel AND writes ShowControllerSetup=0 here, so it stays gone next launch.
+; Set back to 1 by hand to bring the instructions back.
+ShowControllerSetup=1
+ControllerSetupHideModifier=0x10
+ControllerSetupHideKey=0x71
+
+[HP]
+Enabled=1
+CurrentOffset=724
+MaxOffset=728
+OneHpLingerMs=500
+; DamageLingerMs: with [Overlay] HpBars=1, how long (ms) the yellow "just lost" chip lingers
+;   on an HP bar after a hit before it recedes to the new (green) HP level. This also governs how
+;   long the damage/detailed HpBarStyle numbers stay on screen. Default 1500 (1.5s).
+DamageLingerMs=1500
+PollMs=33
+
+[Debug]
+DumpOverlayData=0
+DebugP2PBridge=0
+
+[WebSocket]
+Enabled=0
+Port=39876
+SendMs=33
+
+[TruePing]
+UseHighResTimer=0
+PollSleepMs=33
+DisplayMode=2
+BestWindow=8
+Enabled=1
+Debug=0
+PreferOverlay=1
+SendEnabled=1
+ReceiveEnabled=1
+Channel=63
+AllowGameChannel=0
+SendType=2
+SendMs=1000
+HelloMs=500
+StaleMs=4000
+
+[Migration]
+; Stamps which one-time default migrations have already run, so the overlay never re-forces a
+; recommended default over a value you later changed yourself. Fresh installs start already-stamped.
+SoFreshDefaults=1
+)INI";

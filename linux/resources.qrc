@@ -1,0 +1,10 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/">
+    <file alias="mctde_bg_dark.bmp">../mctde_bg_dark.bmp</file>
+    <file alias="mctde_bg_light.bmp">../mctde_bg_light.bmp</file>
+    <file alias="mctde.ico">../mctde.ico</file>
+    <file alias="CHANGELOG.md">../CHANGELOG.md</file>
+    <file alias="mctde-Link.CHANGELOG.md">../mctde-Link.CHANGELOG.md</file>
+  </qresource>
+</RCC>
