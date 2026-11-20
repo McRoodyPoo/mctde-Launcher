@@ -2,6 +2,12 @@
 
 ## v0.6.0: OneRelease
 
+- Roomier main window: the left-hand toggles are spaced further apart and the Auto-Play / Auto-Update toggles sit higher, so nothing gets cut off (including the controller focus ring and button icon).
+- When Eloise's PTDE Practice Tool isn't installed, its greyed-out toggle now shows as a full grey "off" switch instead of a clipped circle.
+- The controller button icon sits right after the focused toggle's label instead of at the far edge of the row.
+- Turning on Advanced Options with a controller no longer dismisses its warning instantly: the box stays up until you press A again.
+- Bakes the game's own LB / RB / LT / RT button labels for mctde-Link 0.4.9's controller-setup hint.
+- Built with MSVC on GitHub Actions; the build fails if the launcher ever needs the Visual C++ runtime.
 - One release for Windows and Linux: every launcher release now carries `mctde-launcher-windows.zip` (the exe plus README, changelog and license) and `mctde-launcher-linux.zip`. Auto-Update downloads the zip for your OS; the Windows launcher takes the exe out of the Windows zip (falling back to the bare exe on older releases).
 - Auto-Play: tick it next to Auto-Update and the launcher counts down from 5 and starts the game. While it counts, PLAY reads "STOP (5)"; pressing it (or any key or click) cancels.
 - Controller support: a connected XInput controller drives the launcher and Settings, with Xbox, PlayStation or Switch button icons on the focused control.

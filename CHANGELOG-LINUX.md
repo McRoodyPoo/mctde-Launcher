@@ -2,6 +2,9 @@
 
 ## v0.6.0: OneRelease
 
+- Steam now shows you playing Spacewar, not Dark Souls: Prepare to Die Edition, both in game and while DSCM is open. The game also joins the same Spacewar (480) matchmaking pool as Windows players; before, Linux launches quietly ran as PTDE's own appid.
+- The launcher disappears the moment you press PLAY and quits once the game is up. If the game fails to start, it comes back with the error.
+- Bakes the game's own LB / RB / LT / RT button labels for mctde-Link 0.4.9's controller-setup hint.
 - The Linux launcher now shares its version and releases with the Windows launcher: each release carries a Windows zip and a Linux zip, and Auto-Update picks the one for your OS. It reads the version from mctde-Link's `latest.txt` instead of the separate manifest on the `linux` branch, and checks the zip against the SHA-256 published with it.
 
 - DSCM now opens behind the launcher instead of on top of it, like on Windows (KDE Plasma). A short-lived KWin script hands focus back to the launcher when DSCM's window appears; after a few seconds it lets go, so clicking DSCM works as normal.
