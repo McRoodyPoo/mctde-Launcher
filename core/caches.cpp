@@ -195,11 +195,13 @@ static void GenerateFontCacheIfNeeded(const std::string& dataDir, const std::str
 // they are exact. Generated from the user's own files -- nothing copyrighted ships.
 namespace dsicons {
 
-static const uint32_t ICO_VERSION = 5;
+static const uint32_t ICO_VERSION = 6;   // 6: + LB/RB/LT/RT button labels (indices 11-14)
 static const int ICO_SZ = 28;   // baked square size; overlay scales to line height
-static const int ICO_COUNT = 11;
+static const int ICO_COUNT = 15;
 
-// type index -> (atlas 0=Icon20 / 1=Icon40 / 2=Icon30 / 3=Menu04_2, source cell rect on that atlas)
+// type index -> (atlas 0=Icon20 / 1=Icon40 / 2=Icon30 / 3=Menu04_2 / 4=Menu11, source cell rect on that atlas)
+// Atlas 4 entries are copied at native size (not squashed to ICO_SZ): they're wide button labels.
+// Keep in sync with the Windows launcher's dsicons table (mctde_launcher.cpp).
 struct IcoDef { int atlas, x0, y0, x1, y1; };
 static const IcoDef ICO[ICO_COUNT] = {
     { 0,   0,   0,  81,  92 },  // 0 White Summon   : White Sign Soapstone (Icon20 cell0)
@@ -213,6 +215,12 @@ static const IcoDef ICO[ICO_COUNT] = {
     { 0, 410, 828, 492, 920 },  // 8 Host (human)   : Twin Humanities / Split Humanity (Icon20 col5,row9)
     { 0, 328, 828, 410, 920 },  // 9 Host (hollow)  : Humanity                         (Icon20 col4,row9)
     { 3, 126, 430, 168, 472 },  //10 Local marker   : gold lightning framed tile        (Menu04_2 col1,rowB)
+    // The game's Xbox 360 shoulder/trigger labels from the in-menu tab hints ("LB<" ">RB" "LT<" ">RT"),
+    // cropped to exclude the arrows. Link draws them in the controller-setup panel's hide line.
+    { 4, 230, 131, 269, 156 },  //11 LB
+    { 4, 240, 160, 283, 185 },  //12 RB
+    { 4, 230, 197, 269, 222 },  //13 LT
+    { 4, 240, 228, 284, 253 },  //14 RT
 };
 
 // Decode a DXT5 (BC3) DDS to full RGBA.
@@ -338,13 +346,23 @@ static void ExtractIcon(const std::vector<uint8_t>& src, int W, int H, const Ico
     }
 }
 
+// Straight copy of a source rect at native size (for the non-square button labels).
+static void CopyRect(const std::vector<uint8_t>& src, int W, int H, const IcoDef& r, std::vector<uint8_t>& out, int& ow, int& oh){
+    ow = r.x1 - r.x0; oh = r.y1 - r.y0; if(ow<=0||oh<=0){ ow=oh=0; out.clear(); return; }
+    out.assign((size_t)ow*oh*4, 0);
+    for(int y=0;y<oh;++y) for(int x=0;x<ow;++x){
+        int sx=r.x0+x, sy=r.y0+y; if(sx<0||sy<0||sx>=W||sy>=H) continue;
+        memcpy(&out[((size_t)y*ow+x)*4], &src[((size_t)sy*W+sx)*4], 4);
+    }
+}
+
 static uint32_t IconSignature(const std::string& dataDir){
     uint32_t hsh=2166136261u;
     auto mix=[&](const void* pp,size_t n){ const uint8_t* p=(const uint8_t*)pp; for(size_t i=0;i<n;++i){ hsh^=p[i]; hsh*=16777619u; } };
     auto stat=[&](const std::string& path){ uint32_t lo,hi; uint64_t ft;
         if(plat::StatForSignature(path,lo,hi,ft)){ mix(&lo,4); mix(&ft,8); } };
     std::string m0=dataDir+"menu\\menu_0-tpf\\", m1=dataDir+"menu\\menu_1-tpf\\";
-    stat(m0+"Icon20.dds"); stat(m0+"Icon40.dds"); stat(m0+"Icon30.dds"); stat(m1+"Menu04_2.dds");  // loose (if unpacked)
+    stat(m0+"Icon20.dds"); stat(m0+"Icon40.dds"); stat(m0+"Icon30.dds"); stat(m1+"Menu04_2.dds"); stat(m1+"Menu11.dds");  // loose (if unpacked)
     stat(dataDir+"menu\\menu_0.tpf"); stat(dataDir+"menu\\menu_1.tpf");                                // packed (normal layout)
     hsh ^= ICO_VERSION*2654435761u; return hsh;
 }
@@ -365,6 +383,8 @@ static void GenerateIconCacheIfNeeded(const std::string& dataDir, const std::str
     bool ok40 = LoadAtlas(menuDir+"Icon40.dds",   tpf0, "Icon40",   a40, w40, h40);
     bool ok30 = LoadAtlas(menuDir+"Icon30.dds",   tpf0, "Icon30",   a30, w30, h30);
     bool okM042 = LoadAtlas(menu1Dir+"Menu04_2.dds", tpf1, "Menu04_2", aM042, wM042, hM042);
+    std::vector<uint8_t> aM11; int wM11=0, hM11=0;
+    bool okM11 = LoadAtlas(menu1Dir+"Menu11.dds", tpf1, "Menu11", aM11, wM11, hM11);
     if(!ok20) return;   // Icon20 required; Icon40 / Icon30 / Menu04_2 optional
 
     std::vector<uint8_t> blob; blob.reserve((size_t)ICO_COUNT*ICO_SZ*ICO_SZ*4 + 64);
@@ -373,6 +393,14 @@ static void GenerateIconCacheIfNeeded(const std::string& dataDir, const std::str
     pushN("MCTDEICO",8); pU32(ICO_VERSION); pU32(sig); pU16((uint16_t)ICO_SZ); pU16((uint16_t)ICO_COUNT);
     for(int i=0;i<ICO_COUNT;++i){
         std::vector<uint8_t> ic;
+        if(ICO[i].atlas==4){                 // button label: native size, its own w x h
+            int bw=0, bh=0;
+            if(okM11) CopyRect(aM11,wM11,hM11,ICO[i],ic,bw,bh);
+            if(bw<=0||bh<=0){ bw=ICO[i].x1-ICO[i].x0; bh=ICO[i].y1-ICO[i].y0; ic.assign((size_t)bw*bh*4,0); }  // missing -> blank
+            pU16((uint16_t)bw); pU16((uint16_t)bh);
+            pushN(ic.data(), ic.size());
+            continue;
+        }
         if(ICO[i].atlas==0)                  ExtractIcon(a20,w20,h20,ICO[i],ic);
         else if(ICO[i].atlas==1 && ok40)     ExtractIcon(a40,w40,h40,ICO[i],ic);
         else if(ICO[i].atlas==2 && ok30)     ExtractIcon(a30,w30,h30,ICO[i],ic);

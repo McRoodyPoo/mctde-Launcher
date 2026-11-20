@@ -433,6 +433,13 @@ static void PaintBgSlice(HWND h, HDC dc, int w, int hgt) {
                MulDiv(w, bm.bmWidth, cr.right),     MulDiv(hgt, bm.bmHeight, cr.bottom), SRCCOPY);
     SelectObject(mem, ob); DeleteDC(mem);
 }
+// Toggle geometry shared by painting and layout: switch at x 2..32, label from x 38, and the
+// controller badge TOGGLE_BADGE_GAP px after the label. Rows are TOGGLE_ROW_H tall so the focus
+// ring (switch + 5px) and the badge both fit without being clipped at the top/bottom.
+static const int TOGGLE_LABEL_X  = 38;
+static const int TOGGLE_BADGE_SZ = 20;
+static const int TOGGLE_BADGE_GAP = 5;
+static const int TOGGLE_ROW_H    = 26;
 static void DrawToggleSwitch(HDC dc, int px, int py, int pw, int ph, bool on, bool enabled) {
     // A disabled switch stays a clearly-shaped pill (muted track + a grey knob), so it reads as
     // "greyed out", not as a lone floating circle the way a near-invisible track + white knob did.
@@ -474,14 +481,29 @@ static void PaintToggle(HWND h, HDC dc) {
     SetTextColor(dc, txtc);
     HFONT of = (HFONT)SelectObject(dc, g_uiFont);
     wchar_t label[128] = {0}; GetWindowTextW(h, label, 128);
-    RECT tr = rc; tr.left = px + pw + 6; tr.right = W - 4;
+    RECT tr = rc; tr.left = TOGGLE_LABEL_X; tr.right = W - 4;
     DrawTextW(dc, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     SelectObject(dc, of);
     if (focused && g_xiConnected) {
-        int sz = 22, bx = W - 7 - sz, by = (H - sz) / 2;
+        // Sit the badge a fixed gap after the label text, so it reads as part of the row no matter
+        // how wide the control is (it used to hug the control's right edge, far from short labels).
+        RECT cr = tr;
+        HFONT of2 = (HFONT)SelectObject(dc, g_uiFont);
+        DrawTextW(dc, label, -1, &cr, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+        SelectObject(dc, of2);
+        int sz = TOGGLE_BADGE_SZ;
+        int bx = min((int)cr.right + TOGGLE_BADGE_GAP, W - sz - 2), by = (H - sz) / 2;
         RECT bg = { bx, by, bx + sz, by + sz };
         DrawGlyphInto(dc, bg);
     }
+}
+// Width a toggle needs to show switch + label + the controller badge without clipping.
+static int ToggleNeedWidth(HWND h) {
+    wchar_t label[128] = {0}; GetWindowTextW(h, label, 128);
+    HDC dc = GetDC(h); HFONT of = (HFONT)SelectObject(dc, g_uiFont);
+    SIZE ts = {0, 0}; GetTextExtentPoint32W(dc, label, (int)wcslen(label), &ts);
+    SelectObject(dc, of); ReleaseDC(h, dc);
+    return TOGGLE_LABEL_X + ts.cx + TOGGLE_BADGE_GAP + TOGGLE_BADGE_SZ + 3;
 }
 static LRESULT CALLBACK ToggleProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_ERASEBKGND) return 1;
@@ -1191,11 +1213,12 @@ static void GenerateFontCacheIfNeeded(const std::wstring& dataDir, const std::ws
 // they are exact. Generated from the user's own files -- nothing copyrighted ships.
 namespace dsicons {
 
-static const uint32_t ICO_VERSION = 5;
+static const uint32_t ICO_VERSION = 6;   // 6: + LB/RB/LT/RT button labels (indices 11-14)
 static const int ICO_SZ = 28;   // baked square size; overlay scales to line height
-static const int ICO_COUNT = 11;
+static const int ICO_COUNT = 15;
 
-// type index -> (atlas 0=Icon20 / 1=Icon40 / 2=Icon30 / 3=Menu04_2, source cell rect on that atlas)
+// type index -> (atlas 0=Icon20 / 1=Icon40 / 2=Icon30 / 3=Menu04_2 / 4=Menu11, source cell rect on that atlas)
+// Atlas 4 entries are copied at native size (not squashed to ICO_SZ): they're wide button labels.
 struct IcoDef { int atlas, x0, y0, x1, y1; };
 static const IcoDef ICO[ICO_COUNT] = {
     { 0,   0,   0,  81,  92 },  // 0 White Summon   : White Sign Soapstone (Icon20 cell0)
@@ -1209,6 +1232,12 @@ static const IcoDef ICO[ICO_COUNT] = {
     { 0, 410, 828, 492, 920 },  // 8 Host (human)   : Twin Humanities / Split Humanity (Icon20 col5,row9)
     { 0, 328, 828, 410, 920 },  // 9 Host (hollow)  : Humanity                         (Icon20 col4,row9)
     { 3, 126, 430, 168, 472 },  //10 Local marker   : gold lightning framed tile        (Menu04_2 col1,rowB)
+    // The game's Xbox 360 shoulder/trigger labels from the in-menu tab hints ("LB<" ">RB" "LT<" ">RT"),
+    // cropped to exclude the arrows. Link draws them in the controller-setup panel's hide line.
+    { 4, 230, 131, 269, 156 },  //11 LB
+    { 4, 240, 160, 283, 185 },  //12 RB
+    { 4, 230, 197, 269, 222 },  //13 LT
+    { 4, 240, 228, 284, 253 },  //14 RT
 };
 
 // Decode a DXT5 (BC3) DDS to full RGBA.
@@ -1334,13 +1363,23 @@ static void ExtractIcon(const std::vector<uint8_t>& src, int W, int H, const Ico
     }
 }
 
+// Straight copy of a source rect at native size (for the non-square button labels).
+static void CopyRect(const std::vector<uint8_t>& src, int W, int H, const IcoDef& r, std::vector<uint8_t>& out, int& ow, int& oh){
+    ow = r.x1 - r.x0; oh = r.y1 - r.y0; if(ow<=0||oh<=0){ ow=oh=0; out.clear(); return; }
+    out.assign((size_t)ow*oh*4, 0);
+    for(int y=0;y<oh;++y) for(int x=0;x<ow;++x){
+        int sx=r.x0+x, sy=r.y0+y; if(sx<0||sy<0||sx>=W||sy>=H) continue;
+        memcpy(&out[((size_t)y*ow+x)*4], &src[((size_t)sy*W+sx)*4], 4);
+    }
+}
+
 static uint32_t IconSignature(const std::wstring& dataDir){
     uint32_t hsh=2166136261u;
     auto mix=[&](const void* pp,size_t n){ const uint8_t* p=(const uint8_t*)pp; for(size_t i=0;i<n;++i){ hsh^=p[i]; hsh*=16777619u; } };
     auto stat=[&](const std::wstring& path){ WIN32_FILE_ATTRIBUTE_DATA fa;
         if(GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&fa)){ mix(&fa.nFileSizeLow,4); mix(&fa.ftLastWriteTime,sizeof(FILETIME)); } };
     std::wstring m0=dataDir+L"menu\\menu_0-tpf\\", m1=dataDir+L"menu\\menu_1-tpf\\";
-    stat(m0+L"Icon20.dds"); stat(m0+L"Icon40.dds"); stat(m0+L"Icon30.dds"); stat(m1+L"Menu04_2.dds");  // loose (if unpacked)
+    stat(m0+L"Icon20.dds"); stat(m0+L"Icon40.dds"); stat(m0+L"Icon30.dds"); stat(m1+L"Menu04_2.dds"); stat(m1+L"Menu11.dds");  // loose (if unpacked)
     stat(dataDir+L"menu\\menu_0.tpf"); stat(dataDir+L"menu\\menu_1.tpf");                                // packed (normal layout)
     hsh ^= ICO_VERSION*2654435761u; return hsh;
 }
@@ -1361,6 +1400,8 @@ static void GenerateIconCacheIfNeeded(const std::wstring& dataDir, const std::ws
     bool ok40 = LoadAtlas(menuDir+L"Icon40.dds",   tpf0, "Icon40",   a40, w40, h40);
     bool ok30 = LoadAtlas(menuDir+L"Icon30.dds",   tpf0, "Icon30",   a30, w30, h30);
     bool okM042 = LoadAtlas(menu1Dir+L"Menu04_2.dds", tpf1, "Menu04_2", aM042, wM042, hM042);
+    std::vector<uint8_t> aM11; int wM11=0, hM11=0;
+    bool okM11 = LoadAtlas(menu1Dir+L"Menu11.dds", tpf1, "Menu11", aM11, wM11, hM11);
     if(!ok20) return;   // Icon20 required; Icon40 / Icon30 / Menu04_2 optional
 
     std::vector<uint8_t> blob; blob.reserve((size_t)ICO_COUNT*ICO_SZ*ICO_SZ*4 + 64);
@@ -1369,6 +1410,14 @@ static void GenerateIconCacheIfNeeded(const std::wstring& dataDir, const std::ws
     pushN("MCTDEICO",8); pU32(ICO_VERSION); pU32(sig); pU16((uint16_t)ICO_SZ); pU16((uint16_t)ICO_COUNT);
     for(int i=0;i<ICO_COUNT;++i){
         std::vector<uint8_t> ic;
+        if(ICO[i].atlas==4){                 // button label: native size, its own w x h
+            int bw=0, bh=0;
+            if(okM11) CopyRect(aM11,wM11,hM11,ICO[i],ic,bw,bh);
+            if(bw<=0||bh<=0){ bw=ICO[i].x1-ICO[i].x0; bh=ICO[i].y1-ICO[i].y0; ic.assign((size_t)bw*bh*4,0); }  // missing -> blank
+            pU16((uint16_t)bw); pU16((uint16_t)bh);
+            pushN(ic.data(), ic.size());
+            continue;
+        }
         if(ICO[i].atlas==0)                  ExtractIcon(a20,w20,h20,ICO[i],ic);
         else if(ICO[i].atlas==1 && ok40)     ExtractIcon(a40,w40,h40,ICO[i],ic);
         else if(ICO[i].atlas==2 && ok30)     ExtractIcon(a30,w30,h30,ICO[i],ic);
@@ -4230,6 +4279,13 @@ static void XInputPoll() {
     }
     const WORD b = st.Gamepad.wButtons;
     const WORD pressed = (WORD)(b & ~g_xiPrevBtn);   // rising edges this poll
+    // Record the button state BEFORE acting on it. An A press can open a modal box (MessageBox,
+    // e.g. the Advanced Options warning), whose modal loop keeps dispatching our IDT_XINPUT timer,
+    // so this function re-enters while the outer call is still inside BM_CLICK. If g_xiPrevBtn
+    // were only updated at the end, the re-entrant poll would see the same A as a new press and
+    // click the box's default button, dismissing the warning instantly. Updating it here means
+    // the box stays up until A is released and pressed again.
+    g_xiPrevBtn = b;
 
     // Any controller input cancels the Auto-Play countdown, and is swallowed so the same press
     // doesn't also navigate.
@@ -4323,20 +4379,20 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         // Widths are sized to the text so the controls' opaque background doesn't paint over
         // the Artorias silhouette on the right.
         g_chkPhantom = CreateWindowW(L"BUTTON", L"PhantomUnleashed (uncommon)",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 120, 288, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 58, 288, TOGGLE_ROW_H,
             hWnd, (HMENU)IDC_CHK_PHANTOM, g_inst, nullptr);
         g_chkPractice = CreateWindowW(L"BUTTON", L"Eloise's PTDE Practice Tool",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 160, 260, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 102, 260, TOGGLE_ROW_H,
             hWnd, (HMENU)IDC_CHK_PRACTICE, g_inst, nullptr);
         // DSFix enable checkbox. (Its config now lives on the DSFix tab of the Settings window,
         // so there's no separate "Config" button here anymore.)
         g_chkDsfix = CreateWindowW(L"BUTTON", L"DSFix",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 200, 130, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 146, 130, TOGGLE_ROW_H,
             hWnd, (HMENU)IDC_CHK_DSFIX, g_inst, nullptr);
         // Auto-Launch DSCM (Dark Souls Connectivity Mod). Greyed as "Searching for DSCM..."
         // until DSCM.exe is found in the DATA folder (or copied in from a running instance).
         g_chkDscm = CreateWindowW(L"BUTTON", L"Searching for DSCM...",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 238, 288, 22,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 190, 288, TOGGLE_ROW_H,
             hWnd, (HMENU)IDC_CHK_DSCM, g_inst, nullptr);
         // Live date/time in the empty top-left corner (the banner art sits top-right).
         g_lblClock = CreateWindowW(L"STATIC", L"",
@@ -4349,14 +4405,14 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             hWnd, nullptr, g_inst, nullptr);
         // Auto-Update checkbox, left-aligned with the PLAY button below it.
         g_chkAutoUpdate = CreateWindowW(L"BUTTON", L"Auto-Update",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 404, 272, 120, 20,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 404, 262, 120, TOGGLE_ROW_H,
             hWnd, (HMENU)IDC_CHK_AUTOUPDATE, g_inst, nullptr);
         g_chkDark = CreateWindowW(L"BUTTON", L"Dark Mode",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 274, 160, 20,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 234, 160, TOGGLE_ROW_H,
             hWnd, (HMENU)IDC_CHK_DARK, g_inst, nullptr);
         // Auto-Play: when ticked, the launcher counts down from 5 and starts the game by itself.
         g_chkAutoPlay = CreateWindowW(L"BUTTON", L"Auto-Play",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 300, 272, 100, 20,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 300, 262, 100, TOGGLE_ROW_H,
             hWnd, (HMENU)IDC_CHK_AUTOPLAY, g_inst, nullptr);
         HWND chlog = CreateWindowW(L"BUTTON", L"Changelog",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW, 16, 300, 100, 30,
@@ -4375,6 +4431,25 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         for (HWND c : { g_chkPhantom, g_chkDsfix, g_chkPractice, g_chkDscm,
                         g_chkAutoUpdate, g_chkAutoPlay, g_chkDark })
             MakeToggle(c);   // render the main-window checkboxes as slide switches
+        // Widen any left-column toggle whose label + controller badge wouldn't fit.
+        for (HWND c : { g_chkPhantom, g_chkDsfix, g_chkPractice, g_chkDscm, g_chkDark }) {
+            RECT r; GetWindowRect(c, &r); MapWindowPoints(HWND_DESKTOP, hWnd, (POINT*)&r, 2);
+            int need = ToggleNeedWidth(c);
+            if (r.right - r.left < need)
+                SetWindowPos(c, nullptr, 0, 0, need, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+        }
+        // Auto-Update hugs the right edge (it sits on the banner's dark half) and Auto-Play sits
+        // left of it. Keep their usual spots above PLAY / Exit, but shift left just enough that the
+        // label and controller badge fit inside the 524px client.
+        {
+            int needU = ToggleNeedWidth(g_chkAutoUpdate), needP = ToggleNeedWidth(g_chkAutoPlay);
+            int xU = min(404, 524 - needU);
+            int wU = max(120, needU); if (xU + wU > 524) wU = 524 - xU;
+            int xP = min(300, xU - 4 - needP);
+            int wP = xU - 4 - xP;
+            SetWindowPos(g_chkAutoUpdate, nullptr, xU, 262, wU, TOGGLE_ROW_H, SWP_NOZORDER);
+            SetWindowPos(g_chkAutoPlay,   nullptr, xP, 262, wP, TOGGLE_ROW_H, SWP_NOZORDER);
+        }
 
         SendMessageW(g_chkAutoUpdate, BM_SETCHECK, AutoUpdateEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(g_chkAutoPlay,  BM_SETCHECK, AutoPlayEnabled()  ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -4408,11 +4483,12 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             // text into a link to the latest release so the user can go download it.
             SendMessageW(g_chkPractice, BM_SETCHECK, BST_UNCHECKED, 0);
             SetWindowTextW(g_chkPractice, L"");                       // box only, no label
-            SetWindowPos(g_chkPractice, nullptr, 0, 0, 18, 22, SWP_NOMOVE | SWP_NOZORDER);
+            // Wide enough for the whole 30px pill (an 18px box clipped it to a lone half-circle).
+            SetWindowPos(g_chkPractice, nullptr, 0, 0, TOGGLE_LABEL_X - 2, TOGGLE_ROW_H, SWP_NOMOVE | SWP_NOZORDER);
             EnableWindow(g_chkPractice, FALSE);
 
             g_lnkPractice = CreateWindowW(L"STATIC", L"Eloise's PTDE Practice Tool",
-                WS_CHILD | WS_VISIBLE | SS_NOTIFY, 38, 161, 248, 20,
+                WS_CHILD | WS_VISIBLE | SS_NOTIFY, 16 + TOGGLE_LABEL_X, 102 + (TOGGLE_ROW_H - 20) / 2, 248, 20,
                 hWnd, (HMENU)IDC_LNK_PRACTICE, g_inst, nullptr);
             SendMessageW(g_lnkPractice, WM_SETFONT, (WPARAM)g_linkFont, TRUE);
             g_origStaticProc = (WNDPROC)SetWindowLongPtrW(g_lnkPractice, GWLP_WNDPROC, (LONG_PTR)LinkProc);
