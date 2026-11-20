@@ -1,5 +1,5 @@
 # Update manifest for Linux launchers older than 0.6.0 (and installers older than 0.4.0), read from
 # the `linux` branch. Newer builds read mctde-Link's latest.txt (mctde-launcher=) instead.
-mctde-launcher-linux=0.6.0
-mctde-launcher-linux-url=https://github.com/McRoodyPoo/mctde-Launcher/releases/download/v0.6.0/mctde-launcher-linux-0.6.0.tar.gz
-mctde-launcher-linux-sha256=09e19eb66cda2751c78f6d3e90e8d75684a8a05d40877e0a31a879794a41d826
+mctde-launcher-linux=0.6.1
+mctde-launcher-linux-url=https://github.com/McRoodyPoo/mctde-Launcher/releases/download/v0.6.1/mctde-launcher-linux-0.6.1.tar.gz
+mctde-launcher-linux-sha256=3c0e37f0cd177cc920e11b3787bab2db2f327c1bc44e7634efbec68e7909cb85
