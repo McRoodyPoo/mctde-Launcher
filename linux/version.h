@@ -4,4 +4,4 @@
 // self-update can loop.
 #pragma once
 
-#define MCTDE_LINUX_VERSION "0.6.0"
+#define MCTDE_LINUX_VERSION "0.6.1"

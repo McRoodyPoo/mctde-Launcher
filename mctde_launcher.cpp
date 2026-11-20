@@ -46,7 +46,7 @@
 
 // This launcher's own version, shared with the Linux launcher (linux/version.h). Bump both on each
 // launcher release and keep latest.txt's mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.6.0";
+static const char* LAUNCHER_VERSION = "0.6.1";
 
 // Bump this whenever a release must force-reset mctde-link.ini to the documented defaults (e.g. a
 // changed default like Hide Soul Counter now on). On launch, if the ini's [Launcher] ConfigVersion

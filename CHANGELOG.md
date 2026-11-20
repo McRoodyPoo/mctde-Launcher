@@ -1,5 +1,9 @@
 # mctde-Launcher Changelog
 
+## v0.6.1: RightLook
+
+- No Windows changes: this release fixes the Linux launcher's look when it's started by the installer or a Steam shortcut. The version moves with it because Windows and Linux share one launcher version.
+
 ## v0.6.0: OneRelease
 
 - Roomier main window: the left-hand toggles are spaced further apart and the Auto-Play / Auto-Update toggles sit higher, so nothing gets cut off (including the controller focus ring and button icon).

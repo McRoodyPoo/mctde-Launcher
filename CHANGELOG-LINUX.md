@@ -1,5 +1,9 @@
 # mctde-Launcher for Linux Changelog
 
+## v0.6.1: RightLook
+
+- The launcher keeps your desktop's theme and fonts when it's started by the installer, a Steam shortcut or the game. Before, it inherited those programs' bundled libraries, couldn't load KDE's Plasma theme and came up in a plain style with serif fonts.
+
 ## v0.6.0: OneRelease
 
 - Steam now shows you playing Spacewar, not Dark Souls: Prepare to Die Edition, both in game and while DSCM is open. The game also joins the same Spacewar (480) matchmaking pool as Windows players; before, Linux launches quietly ran as PTDE's own appid.
