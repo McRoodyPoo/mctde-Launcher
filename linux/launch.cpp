@@ -42,8 +42,12 @@ static std::string StripSlash(std::string d) {
 }
 
 // Environment for a Proton run: the caller's environment (display, audio, XAUTHORITY...) plus what
-// Steam itself would set for PTDE. Inherited Steam* game variables are dropped so a launcher that
-// Steam started for another app can't leak that app's identity into the game.
+// Steam itself would set. Inherited Steam* game variables are dropped so a launcher that Steam
+// started for another app can't leak that app's identity into the game.
+// SteamAppId / SteamGameId are 480 (Spacewar), not PTDE's 211420: Steam shows "now playing" from
+// them, and steam_api prefers SteamAppId over steam_appid.txt -- with 211420 here Steam reported
+// "Dark Souls: Prepare to Die Edition" for the game and for DSCM (same env) instead of Spacewar.
+// STEAM_COMPAT_APP_ID stays 211420: it only selects Proton's per-app compat config for PTDE's prefix.
 static std::vector<std::string> BuildEnv(const steam::Env& env, const std::string& gameDir) {
     std::vector<std::string> out;
     for (char** e = environ; *e; ++e) {
@@ -58,8 +62,8 @@ static std::vector<std::string> BuildEnv(const steam::Env& env, const std::strin
     out.push_back("STEAM_COMPAT_DATA_PATH=" + env.compatData);
     out.push_back("STEAM_COMPAT_INSTALL_PATH=" + gameDir);
     out.push_back(std::string("STEAM_COMPAT_APP_ID=") + steam::PTDE_APPID);
-    out.push_back(std::string("SteamAppId=") + steam::PTDE_APPID);
-    out.push_back(std::string("SteamGameId=") + steam::PTDE_APPID);
+    out.push_back(std::string("SteamAppId=") + steam::PLAY_APPID);
+    out.push_back(std::string("SteamGameId=") + steam::PLAY_APPID);
     out.push_back("MCTDE_VIA_LAUNCHER=1");
     return out;
 }

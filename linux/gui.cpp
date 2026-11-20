@@ -413,6 +413,10 @@ private:
         }
         SetBusy(true);
         play_->setText("...");
+        // Vanish the moment PLAY is pressed, like the Windows launcher. The process lingers hidden
+        // only while it confirms the game didn't die on startup; on failure the window comes back
+        // with the error.
+        hide();
         if (Blocked()) {
             pendingPlay_ = true;
             SetStatus(dscmStarting_ ? "Waiting for DSCM..." : "Checking for updates...");
@@ -422,7 +426,10 @@ private:
         RunAsync<launch::Result>(this,
             [this] { return launch::PlayGame(env_, inst_, 15); },
             [this](launch::Result r) {
-                if (r.started && !(r.exitedEarly && r.exitCode != 0)) { busy_ = false; close(); return; }
+                // Quit outright: the window is already hidden, and Qt's quit-on-last-window-closed only
+                // fires when a VISIBLE window closes -- close() here left the process running forever.
+                if (r.started && !(r.exitedEarly && r.exitCode != 0)) { busy_ = false; QCoreApplication::quit(); return; }
+                show(); raise(); activateWindow();
                 SetBusy(false);
                 play_->setText("PLAY");
                 SetStatus("Launch failed", true);

@@ -17,6 +17,9 @@ namespace steam {
 // PTDE's real Steam appid. The game itself still runs as 480 via steam_appid.txt (shared mctde
 // matchmaking pool); 211420 only picks the Proton prefix and Proton's per-game settings.
 constexpr const char* PTDE_APPID = "211420";
+// The appid the game (and DSCM) present to Steam: 480, Spacewar -- the shared mctde matchmaking pool,
+// and what Steam should show as "now playing". PTDE_APPID is only used to find PTDE's Proton prefix.
+constexpr const char* PLAY_APPID = "480";
 
 struct Env {
     std::string root;            // Steam client install (…/.local/share/Steam)
