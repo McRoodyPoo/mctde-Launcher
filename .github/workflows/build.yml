@@ -1,0 +1,53 @@
+name: Build Windows launcher (MSVC)
+
+# Builds mctde_launcher.exe with real MSVC (x86, static CRT), mirroring build_launcher.bat, on
+# GitHub's Windows runners so release builds don't depend on a local Windows install. The exe is
+# uploaded as a workflow artifact on every run.
+
+on:
+  push:
+    paths:
+      - 'mctde_launcher.cpp'
+      - 'mctde_launcher.rc'
+      - 'resource.h'
+      - '*.bmp'
+      - '*.ico'
+      - '*.png'
+      - 'mctde-Link.CHANGELOG.md'
+      - 'CHANGELOG.md'
+      - '.github/workflows/build.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build mctde_launcher.exe (x86, /MT)
+        shell: cmd
+        run: |
+          if not exist bin mkdir bin
+          cd bin
+          rc /nologo /fo mctde_launcher.res "..\mctde_launcher.rc" || exit /b 1
+          cl /nologo /O2 /MT /EHsc /DUNICODE /D_UNICODE /I".." "..\mctde_launcher.cpp" mctde_launcher.res /Fe:mctde_launcher.exe /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib || exit /b 1
+
+      # Must run under Proton/Wine and on fresh Windows: no VC++ runtime DLL dependencies.
+      - name: Check for runtime DLL dependencies
+        shell: pwsh
+        run: |
+          $deps = dumpbin /nologo /dependents bin\mctde_launcher.exe
+          $deps
+          $bad = $deps | Select-String -Pattern 'VCRUNTIME|MSVCP|api-ms-win-crt|ucrtbase'
+          if ($bad) { throw "mctde_launcher.exe depends on the VC++ runtime: $($bad -join ', ')" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mctde_launcher-win32
+          path: bin/mctde_launcher.exe
+          if-no-files-found: error
