@@ -53,6 +53,7 @@
 #include <functional>
 #include <memory>
 #include <thread>
+#include <unistd.h>
 
 namespace {
 
@@ -541,7 +542,41 @@ private:
 
 } // namespace
 
+// Started from inside another program's bundled-library world -- the installer AppImage, a Steam
+// non-Steam-game shortcut (Steam runtime) or Proton's pressure-vessel (the game's launcher guard) --
+// LD_LIBRARY_PATH points at that program's older libraries. Qt then can't load KDE's Plasma platform
+// theme / Breeze style, and an old fontconfig chokes on the system's config: the window comes up in a
+// bare style with serif fallback fonts. Drop those borrowed entries (keeping any of the user's own)
+// and restart once with the cleaned environment.
+static void ReexecWithoutBorrowedLibs(char** argv) {
+    const char* llp = getenv("LD_LIBRARY_PATH");
+    if (!llp || !*llp || getenv("MCTDE_LIBS_CLEANED")) return;
+    const char* appdir = getenv("APPDIR");
+    std::string kept, cur, all = llp;
+    bool changed = false;
+    auto borrowed = [&](const std::string& d) {
+        return d.find("/.mount_") != std::string::npos || d.find("steam-runtime") != std::string::npos ||
+               d.find("SteamLinuxRuntime") != std::string::npos || d.find("pressure-vessel") != std::string::npos ||
+               d.find("/ubuntu12_") != std::string::npos || d.find("/steamrt") != std::string::npos ||
+               (appdir && *appdir && d.rfind(appdir, 0) == 0);
+    };
+    for (size_t i = 0; i <= all.size(); ++i) {
+        if (i == all.size() || all[i] == ':') {
+            if (!cur.empty()) {
+                if (borrowed(cur)) changed = true;
+                else { if (!kept.empty()) kept += ':'; kept += cur; }
+            }
+            cur.clear();
+        } else cur += all[i];
+    }
+    if (!changed) return;
+    if (kept.empty()) unsetenv("LD_LIBRARY_PATH"); else setenv("LD_LIBRARY_PATH", kept.c_str(), 1);
+    setenv("MCTDE_LIBS_CLEANED", "1", 1);   // never loop
+    execv("/proc/self/exe", argv);          // on failure, carry on as we are
+}
+
 int main(int argc, char** argv) {
+    ReexecWithoutBorrowedLibs(argv);
     // Any argument other than --dir <folder> means the command line.
     bool cli = argc > 1 && !(argc == 3 && std::string(argv[1]) == "--dir");
     if (cli) return RunCli(argc, argv);
