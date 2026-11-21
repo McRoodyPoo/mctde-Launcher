@@ -1,5 +1,11 @@
 # mctde-Launcher for Linux Changelog
 
+## v0.7.0
+
+- New Settings tab "Vulkan" with dxvk.conf tuning: present interval, max frame latency, HUD.
+- The Enable Vulkan toggle is greyed out: Proton already renders through its own DXVK.
+- LB / RB cycle through all three Settings tabs.
+
 ## v0.6.1: RightLook
 
 - The launcher keeps your desktop's theme and fonts when it's started by the installer, a Steam shortcut or the game. Before, it inherited those programs' bundled libraries, couldn't load KDE's Plasma theme and came up in a plain style with serif fonts.

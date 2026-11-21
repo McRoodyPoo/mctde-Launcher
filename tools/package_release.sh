@@ -23,9 +23,9 @@ cd "$(dirname "$0")/.."
 VER=${1:-}
 [[ -n $VER ]] || { echo "usage: $0 <version>" >&2; exit 2; }
 [[ $VER =~ ^[0-9]+(\.[0-9]+)*$ ]] || { echo "Use a plain dotted version (e.g. 0.6.0)." >&2; exit 1; }
-WIN_VER=$(sed -n 's/^static const char\* LAUNCHER_VERSION = "\(.*\)";/\1/p' mctde_launcher.cpp)
+WIN_VER=$(sed -n 's/^static const char\* LAUNCHER_VERSION *= "\([^"]*\)".*/\1/p' mctde_launcher.cpp)
 CORE_VER=$(sed -n 's/^const char\* const LAUNCHER_VERSION *= "\([^"]*\)".*/\1/p' core/install.cpp)
-LNX_VER=$(sed -n 's/^#define MCTDE_LINUX_VERSION "\(.*\)"/\1/p' linux/version.h)
+LNX_VER=$(sed -n 's/^#define MCTDE_LINUX_VERSION "\([^"]*\)".*/\1/p' linux/version.h)
 for pair in "mctde_launcher.cpp:$WIN_VER" "core/install.cpp:$CORE_VER" "linux/version.h:$LNX_VER"; do
     [[ ${pair#*:} == "$VER" ]] || { echo "${pair%%:*} says ${pair#*:}, not $VER. Bump all three first." >&2; exit 1; }
 done

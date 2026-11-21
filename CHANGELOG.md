@@ -1,5 +1,13 @@
 # mctde-Launcher Changelog
 
+## v0.7.0
+
+- New Settings tab "Vulkan": turn the bundled DXVK renderer on or off.
+- The Vulkan tab also tunes dxvk.conf: present interval, max frame latency, DXVK HUD.
+- "Edit dxvk.conf" opens the file for hand edits.
+- Under Proton the toggle is greyed out, since Proton brings its own DXVK.
+- A config reset keeps your Vulkan choice and chainload folder.
+
 ## v0.6.1: RightLook
 
 - No Windows changes: this release fixes the Linux launcher's look when it's started by the installer or a Steam shortcut. The version moves with it because Windows and Linux share one launcher version.
