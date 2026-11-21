@@ -1,5 +1,9 @@
 # mctde-Launcher Changelog
 
+## v0.7.1
+
+- No Windows changes: this release fixes the Linux launcher's Vulkan tab (one shared version).
+
 ## v0.7.0
 
 - New Settings tab "Vulkan": turn the bundled DXVK renderer on or off.

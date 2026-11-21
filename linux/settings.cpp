@@ -1061,7 +1061,7 @@ public:
         connect(editConf, &QPushButton::clicked, this, [this] { OpenInEditor(ResolvedIn(inst_.Dir(), "dxvk.conf")); });
     }
     int ContentHeight() const { return sc_.ContentHeight(); }
-    void Relayout() { sc_.Relayout(); }
+    void Relayout() { sc_.area->setGeometry(rect()); sc_.Relayout(); }
     void ForceAdvanced() {}
     void Save() {
         // Linux: the on/off switch is greyed (Proton owns the renderer), so only dxvk.conf is written.
@@ -1072,6 +1072,9 @@ public:
         plat::WriteText(confPath_, t);
         text_ = t;
     }
+protected:
+    void resizeEvent(QResizeEvent*) override { Relayout(); }
+
 private:
     int Layout(int w) {
         const int LX = 16, FX = 200, ROW = 30, HDR = 28; int y = 16;

@@ -1,5 +1,9 @@
 # mctde-Launcher for Linux Changelog
 
+## v0.7.1
+
+- Settings → Vulkan no longer comes up blank: the greyed toggle and dxvk.conf rows now show.
+
 ## v0.7.0
 
 - New Settings tab "Vulkan" with dxvk.conf tuning: present interval, max frame latency, HUD.
