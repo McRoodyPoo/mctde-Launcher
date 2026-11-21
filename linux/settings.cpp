@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <cstring>
 #include <functional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -972,6 +973,128 @@ private:
     std::vector<QLabel*> lbl;
 };
 
+// ============================================================ Vulkan (DXVK) tab
+// On Linux the game always renders on Vulkan through Proton's own DXVK, so the on/off switch
+// is shown but greyed out (it can't change that). The dxvk.conf tuning rows DO apply -- Proton's
+// DXVK reads dxvk.conf from the game's working directory -- so they stay editable. Mirrors the
+// Windows launcher's Vulkan tab (mctde_launcher.cpp).
+const std::vector<QString> VK_PRESENT_LBL = { "App-controlled", "Off", "On (vsync)", "Half-rate (30 fps)" };
+const std::vector<QString> VK_PRESENT_VAL = { "-1", "0", "1", "2" };
+const std::vector<QString> VK_MAXLAT_LBL  = { "Default", "1 (lowest latency)", "2", "3" };
+const std::vector<QString> VK_MAXLAT_VAL  = { "0", "1", "2", "3" };
+
+static const char* const kDxvkConfDefault =
+    "# DXVK config for PTDE (read from the game's working directory).\n"
+    "# The mctde launcher's \"Vulkan\" tab edits this file for you.\n\n"
+    "d3d9.presentInterval = 2\n";
+
+// Active (uncommented) value of a dxvk.conf key ("key = value"); "" if absent/commented.
+static std::string DxvkConfGet(const std::string& text, const std::string& key) {
+    std::istringstream in(text); std::string line;
+    while (std::getline(in, line)) {
+        size_t a = line.find_first_not_of(" \t\r\n");
+        if (a == std::string::npos) continue;
+        std::string s = line.substr(a);
+        if (s[0] == '#') continue;
+        size_t eq = s.find('='); if (eq == std::string::npos) continue;
+        std::string k = s.substr(0, eq); size_t ke = k.find_last_not_of(" \t");
+        k = (ke == std::string::npos) ? "" : k.substr(0, ke + 1);
+        if (k != key) continue;
+        std::string v = s.substr(eq + 1);
+        size_t va = v.find_first_not_of(" \t"); size_t ve = v.find_last_not_of(" \t\r\n");
+        return (va == std::string::npos) ? "" : v.substr(va, ve - va + 1);
+    }
+    return "";
+}
+// Set a dxvk.conf key: non-empty -> uncommented `key = value` (replacing any line for the key,
+// else appending); empty -> comment out any active line (DXVK falls back to its default).
+static std::string DxvkConfSet(const std::string& text, const std::string& key, const std::string& value) {
+    std::vector<std::string> lines;
+    { std::istringstream in(text); std::string l;
+      while (std::getline(in, l)) { if (!l.empty() && l.back() == '\r') l.pop_back(); lines.push_back(l); } }
+    auto keyOf = [](const std::string& raw, bool& commented) -> std::string {
+        size_t a = raw.find_first_not_of(" \t"); if (a == std::string::npos) return "";
+        std::string s = raw.substr(a); commented = false;
+        if (s[0] == '#') { commented = true; size_t b = s.find_first_not_of(" \t", 1);
+                           if (b == std::string::npos) return ""; s = s.substr(b); }
+        size_t eq = s.find('='); if (eq == std::string::npos) return "";
+        std::string k = s.substr(0, eq); size_t ke = k.find_last_not_of(" \t");
+        return (ke == std::string::npos) ? "" : k.substr(0, ke + 1);
+    };
+    const std::string newline = key + " = " + value; bool done = false;
+    for (auto& l : lines) {
+        bool commented = false;
+        if (keyOf(l, commented) != key) continue;
+        if (!value.empty()) { if (!done) { l = newline; done = true; } else if (!commented) l = "# " + l; }
+        else if (!commented) l = "# " + l;
+    }
+    if (!value.empty() && !done) { if (!lines.empty() && !lines.back().empty()) lines.push_back(""); lines.push_back(newline); }
+    std::string out; for (const auto& l : lines) { out += l; out += "\n"; } return out;
+}
+
+class VulkanPage : public QWidget {
+public:
+    VulkanPage(QWidget* parent, const mctde::Install& inst, std::function<void()> refit)
+        : QWidget(parent), inst_(inst), refit_(std::move(refit)) {
+        sc_.Build(this);
+        QWidget* c = sc_.content;
+        confPath_ = S(ResolvedIn(inst_.Dir(), "dxvk.conf"));
+        text_ = plat::ReadText(confPath_);
+        auto G = [&](const char* k, const char* d) { std::string v = DxvkConfGet(text_, k); return v.empty() ? std::string(d) : v; };
+
+        hdr = Header(c, "Vulkan Renderer (DXVK)");
+        enable = Check(c, "Enable Vulkan (DXVK)", true);
+        enable->setEnabled(false);   // Linux: Proton's own DXVK is always in play
+        note = Label(c, "Linux/Proton already renders on Vulkan via Proton's own DXVK, so this "
+                        "switch isn't needed here. The settings below still apply.");
+        note->setWordWrap(true);
+        lblPresent = Label(c, "Vsync / present interval");
+        present = Mapped(c, VK_PRESENT_LBL, VK_PRESENT_VAL, Q(G("d3d9.presentInterval", "-1")));
+        lblMaxLat = Label(c, "Max frame latency");
+        maxLat = Mapped(c, VK_MAXLAT_LBL, VK_MAXLAT_VAL, Q(G("d3d9.maxFrameLatency", "0")));
+        hud = Check(c, "Show DXVK HUD (fps + frametimes)", !DxvkConfGet(text_, "dxvk.hud").empty());
+        editConf = new RoundButton("Edit dxvk.conf", c);
+        credit = Label(c, "DXVK by Philip Rebohle and contributors - zlib/libpng license. github.com/doitsujin/dxvk");
+
+        for (QComboBox* cb : { present, maxLat }) sc_.GuardWheel(cb);
+        sc_.layout = [this](int w) { return Layout(w); };
+        connect(editConf, &QPushButton::clicked, this, [this] { OpenInEditor(ResolvedIn(inst_.Dir(), "dxvk.conf")); });
+    }
+    int ContentHeight() const { return sc_.ContentHeight(); }
+    void Relayout() { sc_.Relayout(); }
+    void ForceAdvanced() {}
+    void Save() {
+        // Linux: the on/off switch is greyed (Proton owns the renderer), so only dxvk.conf is written.
+        std::string t = text_.empty() ? std::string(kDxvkConfDefault) : text_;
+        t = DxvkConfSet(t, "d3d9.presentInterval", Value(present));
+        t = DxvkConfSet(t, "d3d9.maxFrameLatency", Value(maxLat));
+        t = DxvkConfSet(t, "dxvk.hud", hud->isChecked() ? "fps,frametimes" : "");
+        plat::WriteText(confPath_, t);
+        text_ = t;
+    }
+private:
+    int Layout(int w) {
+        const int LX = 16, FX = 200, ROW = 30, HDR = 28; int y = 16;
+        Put(hdr, LX, y, w - 32, 18); y += HDR;
+        Put(enable, LX, y, 320, 22); y += ROW;
+        Put(note, LX, y, w - 32, 36); y += 42;
+        Put(lblPresent, LX, y + 3, FX - LX - 6, 18); Put(present, FX, y, 170, 24); y += ROW;
+        Put(lblMaxLat,  LX, y + 3, FX - LX - 6, 18); Put(maxLat,  FX, y, 170, 24); y += ROW;
+        Put(hud, LX, y, 320, 22); y += ROW + 6;
+        Put(editConf, LX, y, 130, 24); y += 34;
+        Put(credit, LX, y, w - 32, 16); y += 22;
+        return y + 6;
+    }
+    const mctde::Install& inst_;
+    std::function<void()> refit_;
+    Scroller sc_;
+    std::string text_, confPath_;
+    QLabel *hdr, *note, *lblPresent, *lblMaxLat, *credit;
+    QCheckBox *enable, *hud;
+    QComboBox *present, *maxLat;
+    QPushButton* editConf;
+};
+
 // ============================================================ the host window
 class SettingsDialog : public QDialog {
 public:
@@ -985,7 +1108,8 @@ public:
         const int TABH = 28, TABW = 96, TABX = 12, TABGAP = 2, TABY = SET_PANELY - TABH - 6;
         tabDs_ = new TabButton("DSFix", this); tabDs_->setGeometry(TABX, TABY, TABW, TABH);
         tabMc_ = new TabButton("mctde", this); tabMc_->setGeometry(TABX + TABW + TABGAP, TABY, TABW, TABH);
-        tabDs_->setObjectName("tabDs"); tabMc_->setObjectName("tabMc");   // controller LB / RB
+        tabVk_ = new TabButton("Vulkan", this); tabVk_->setGeometry(TABX + 2 * (TABW + TABGAP), TABY, TABW, TABH);
+        tabDs_->setObjectName("tabDs"); tabMc_->setObjectName("tabMc"); tabVk_->setObjectName("tabVk");   // controller LB / RB
         save_ = new RoundButton("Save", this, true);
         cancel_ = new RoundButton("Cancel", this);
         save_->setDefault(true);
@@ -995,12 +1119,15 @@ public:
         else dsMissing_ = Placeholder("dsfix.ini was not found next to the launcher.\nInstall DSFix into this folder to configure it.");
         if (mcAvail_) mc_ = new McPage(this, inst, refit);
         else mcMissing_ = Placeholder("mctde-link.ini was not found next to the launcher.");
+        vk_ = new VulkanPage(this, inst, refit);   // always available (manages dxvk.conf)
 
         connect(tabDs_, &QPushButton::clicked, this, [this] { SelectTab(0); });
         connect(tabMc_, &QPushButton::clicked, this, [this] { SelectTab(1); });
+        connect(tabVk_, &QPushButton::clicked, this, [this] { SelectTab(2); });
         connect(save_, &QPushButton::clicked, this, [this] {
             if (ds_) ds_->Save();
             if (mc_) mc_->Save();
+            if (vk_) vk_->Save();
             accept();
         });
         connect(cancel_, &QPushButton::clicked, this, &QDialog::reject);
@@ -1019,6 +1146,7 @@ private:
         return l;
     }
     QWidget* Page(int tab) const {
+        if (tab == 2) return (QWidget*)vk_;
         return tab == 0 ? (ds_ ? (QWidget*)ds_ : (QWidget*)dsMissing_) : (mc_ ? (QWidget*)mc_ : (QWidget*)mcMissing_);
     }
 
@@ -1026,8 +1154,11 @@ private:
         tab_ = tab;
         Page(0)->setVisible(tab == 0);
         Page(1)->setVisible(tab == 1);
-        tabDs_->active = tab == 0; tabMc_->active = tab == 1;
-        tabDs_->update(); tabMc_->update();
+        Page(2)->setVisible(tab == 2);
+        tabDs_->active = tab == 0; tabMc_->active = tab == 1; tabVk_->active = tab == 2;
+        // Dynamic property the gamepad handler reads to cycle LB/RB through the three tabs.
+        tabDs_->setProperty("cur", tab == 0); tabMc_->setProperty("cur", tab == 1); tabVk_->setProperty("cur", tab == 2);
+        tabDs_->update(); tabMc_->update(); tabVk_->update();
         ApplySize();
         // Start on the tab's first field (controller navigation). Deferred: on the first call the
         // window isn't shown yet and focus set now would be lost to the default button.
@@ -1045,6 +1176,7 @@ private:
         int panelH = 180;
         if (tab_ == 0 && ds_) panelH = std::clamp(ds_->ContentHeight() + 2, 160, maxPanelH);
         if (tab_ == 1 && mc_) panelH = std::clamp(mc_->ContentHeight() + 2, 160, maxPanelH);
+        if (tab_ == 2 && vk_) panelH = std::clamp(vk_->ContentHeight() + 2, 160, maxPanelH);
         int want = SET_PANELY + panelH + SET_BTNBAR;
         // Fixed width; height free between a floor and the wanted size, so a compositor that keeps
         // the old height still gets a valid (scrolling) layout instead of a clipped one.
@@ -1064,6 +1196,7 @@ private:
         else page->setGeometry(0, SET_PANELY, CW, panelH);
         if (tab_ == 0 && ds_) ds_->Relayout();
         if (tab_ == 1 && mc_) mc_->Relayout();
+        if (tab_ == 2 && vk_) vk_->Relayout();
         const int btnY = CH - 36;
         save_->setGeometry(CW - 164, btnY, 70, 28);
         cancel_->setGeometry(CW - 86, btnY, 70, 28);
@@ -1076,10 +1209,11 @@ protected:
 private:
     bool dsAvail_ = false, mcAvail_ = false;
     int tab_ = 0;
-    TabButton *tabDs_, *tabMc_;
+    TabButton *tabDs_, *tabMc_, *tabVk_;
     RoundButton *save_, *cancel_;
     DsfixPage* ds_ = nullptr;
     McPage* mc_ = nullptr;
+    VulkanPage* vk_ = nullptr;
     QLabel *dsMissing_ = nullptr, *mcMissing_ = nullptr;
 };
 

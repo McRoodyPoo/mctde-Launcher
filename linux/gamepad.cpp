@@ -274,8 +274,23 @@ void Navigator::Poll() {
             if (top == main_) { if (onStart) QTimer::singleShot(0, this, [this] { onStart(); }); }
             else for (QPushButton* p : top->findChildren<QPushButton*>()) if (p->isDefault() && p->isVisible()) { ClickLater(p); break; }
         }
-        if ((pressed & (LB | RB)) && top)
-            if (auto* tab = top->findChild<QPushButton*>((pressed & LB) ? "tabDs" : "tabMc")) ClickLater(tab);
+        if ((pressed & (LB | RB)) && top) {
+            // Cycle LB/RB through whichever Settings tabs exist (DSFix, mctde, Vulkan). The active
+            // tab carries a dynamic "cur" property set by SettingsDialog::SelectTab.
+            const char* names[] = { "tabDs", "tabMc", "tabVk" };
+            QPushButton* tabs[3] = { nullptr, nullptr, nullptr };
+            int n = 0, cur = 0;
+            for (const char* nm : names) {
+                if (auto* t = top->findChild<QPushButton*>(nm)) {
+                    if (t->property("cur").toBool()) cur = n;
+                    tabs[n++] = t;
+                }
+            }
+            if (n > 0) {
+                int next = (pressed & LB) ? (cur + n - 1) % n : (cur + 1) % n;
+                if (tabs[next]) ClickLater(tabs[next]);
+            }
+        }
     }
     prevButtons_ = b;
 }
