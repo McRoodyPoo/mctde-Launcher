@@ -46,7 +46,7 @@
 
 // This launcher's own version, shared with the Linux launcher (linux/version.h). Bump both on each
 // launcher release and keep latest.txt's mctde-launcher= line in sync, or self-update can loop.
-static const char* LAUNCHER_VERSION = "0.6.1";
+static const char* LAUNCHER_VERSION = "0.7.0";   // Vulkan tab; kept above the released version so auto-update won't overwrite a local test build
 
 // Bump this whenever a release must force-reset mctde-link.ini to the documented defaults (e.g. a
 // changed default like Hide Soul Counter now on). On launch, if the ini's [Launcher] ConfigVersion
@@ -123,6 +123,13 @@ static const wchar_t* PRACTICE_RELEASE_URL =
 #define IDC_SET_TAB_MC   2041
 #define IDC_SET_SAVE     2042
 #define IDC_SET_CANCEL   2043
+#define IDC_SET_TAB_VK   2044
+// Vulkan (DXVK) config tab controls.
+#define IDC_VK_ENABLE    2400   // on/off toggle: mctde-link.ini [Compatibility] RealD3D9Path
+#define IDC_VK_PRESENT   2401   // dxvk.conf d3d9.presentInterval
+#define IDC_VK_MAXLAT    2402   // dxvk.conf d3d9.maxFrameLatency
+#define IDC_VK_HUD       2403   // dxvk.conf dxvk.hud (fps,frametimes)
+#define IDC_VK_EDITCONF  2404   // open dxvk.conf in the default editor
 // HUD Mod sub-window
 #define IDC_HUD_EN       2060
 #define IDC_HUD_MIN      2061
@@ -216,6 +223,21 @@ static bool FileExists(const std::wstring& p) {
     DWORD a = GetFileAttributesW(p.c_str());
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
+
+// True when the launcher is running under Wine / Proton (Linux). ntdll exports
+// wine_get_version only there. Used to adapt the Vulkan tab: on Proton the game
+// already runs on Vulkan via Proton's own DXVK, so the bundled-DXVK on/off toggle is
+// pointless (and double-DXVK can glitch) -- we grey it out there but still let players
+// edit dxvk.conf, which Proton's DXVK reads from the game's working directory.
+static bool RunningUnderWine() {
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    return nt && GetProcAddress(nt, "wine_get_version") != nullptr;
+}
+
+// The bundled DXVK d3d9 the installer drops next to the launcher, and whether
+// mctde-Link is currently pointed at it (Vulkan on) via [Compatibility] RealD3D9Path.
+static std::wstring DxvkDllPath() { return PathIn(L"d3d9_dxvk.dll"); }
+static bool DxvkInstalled()       { return FileExists(DxvkDllPath()); }
 
 // ------------------------------------------------------------ theme (light / dark)
 static bool   g_dark = false;
@@ -953,8 +975,17 @@ static void EnsureIniSeeded() {
     wchar_t cv[32] = {0};
     GetPrivateProfileStringW(L"Launcher", L"ConfigVersion", L"", cv, 32, ini.c_str());
     if (wcscmp(cv, INI_CONFIG_VERSION) != 0) {
+        // A full reset to kDefaultIni would drop [Compatibility], where the user's renderer
+        // choice (RealD3D9Path) and chainload folder live -- kDefaultIni has no such section.
+        // Carry those two across the reset so an upgrade never silently turns Vulkan off or
+        // breaks DLL chaining. (mctde-Link re-adds any other [Compatibility] defaults itself.)
+        wchar_t realD3D9[512] = {0}, chainFolder[256] = {0};
+        GetPrivateProfileStringW(L"Compatibility", L"RealD3D9Path",   L"", realD3D9,    512, ini.c_str());
+        GetPrivateProfileStringW(L"Compatibility", L"ChainloadFolder", L"", chainFolder, 256, ini.c_str());
         WriteFileUtf8(ini, kDefaultIni);
         g_iniWasReset = true;
+        if (realD3D9[0])    WritePrivateProfileStringW(L"Compatibility", L"RealD3D9Path",   realD3D9,    ini.c_str());
+        if (chainFolder[0]) WritePrivateProfileStringW(L"Compatibility", L"ChainloadFolder", chainFolder, ini.c_str());
     }
 }
 
@@ -1536,6 +1567,22 @@ static bool LaunchGame() {
         std::string ini = ReadFileUtf8(DsfixIniPath());
         if (DsfixGet(ini, "aaType", "SMAA") != "none")
             WriteFileUtf8(DsfixIniPath(), DsfixSet(ini, "aaType", "none"));
+    }
+
+    // Linux / Proton: the game already renders on Vulkan through Proton's own DXVK, so
+    // forcing mctde-Link to load our bundled Windows DXVK on top of that is redundant and
+    // can glitch. If RealD3D9Path points at our bundled d3d9_dxvk.dll, clear it here so the
+    // "real" d3d9 is Proton's DXVK. dxvk.conf still applies (Proton's DXVK reads it). A
+    // user's own custom RealD3D9Path (pointing elsewhere) is left untouched.
+    if (RunningUnderWine()) {
+        std::wstring mlini = PathIn(L"mctde-link.ini");
+        wchar_t cur[512] = {0};
+        GetPrivateProfileStringW(L"Compatibility", L"RealD3D9Path", L"", cur, 512, mlini.c_str());
+        std::wstring v = cur;
+        size_t slash = v.find_last_of(L"\\/");
+        std::wstring base = (slash == std::wstring::npos) ? v : v.substr(slash + 1);
+        if (!base.empty() && _wcsicmp(base.c_str(), L"d3d9_dxvk.dll") == 0)
+            WritePrivateProfileStringW(L"Compatibility", L"RealD3D9Path", nullptr, mlini.c_str());
     }
 
     const wchar_t* exes[] = { L"DARKSOULS.exe", L"DATA.exe" };
@@ -3015,6 +3062,229 @@ static LRESULT CALLBACK McDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
+// ============================================================ Vulkan (DXVK) config panel
+// A third Settings tab. Two jobs:
+//   * On/off: point mctde-Link at the bundled DXVK by writing [Compatibility] RealD3D9Path in
+//     mctde-link.ini (delete the key = native D3D9). This is the "choose Vulkan vs D3D9" switch.
+//   * Tuning: edit dxvk.conf (present interval / frame latency / HUD), which DXVK reads from the
+//     game's working directory -- on Windows for our bundled DXVK, and on Proton for Proton's own.
+// Under Proton the on/off switch is greyed out (Proton already renders on Vulkan via its own DXVK);
+// the tuning rows stay, since Proton's DXVK honours the same dxvk.conf.
+
+static std::wstring DxvkConfPath() { return PathIn(L"dxvk.conf"); }
+
+// The default dxvk.conf we write if the folder has none (matches the installer's bundled one).
+static const char* const kDxvkConfDefault =
+    "# DXVK config for PTDE (read from the game's working directory).\n"
+    "# The mctde launcher's \"Vulkan\" tab edits this file for you.\n\n"
+    "d3d9.presentInterval = 2\n";
+
+// Read the active (uncommented) value of a dxvk.conf key ("key = value"); "" if absent/commented.
+static std::string DxvkConfGet(const std::string& text, const std::string& key) {
+    std::istringstream in(text);
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t a = line.find_first_not_of(" \t\r\n");
+        if (a == std::string::npos) continue;
+        std::string s = line.substr(a);
+        if (s[0] == '#') continue;                         // a comment
+        size_t eq = s.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = s.substr(0, eq);
+        size_t ke = k.find_last_not_of(" \t");
+        k = (ke == std::string::npos) ? "" : k.substr(0, ke + 1);
+        if (k != key) continue;
+        std::string v = s.substr(eq + 1);
+        size_t va = v.find_first_not_of(" \t");
+        size_t ve = v.find_last_not_of(" \t\r\n");
+        return (va == std::string::npos) ? "" : v.substr(va, ve - va + 1);
+    }
+    return "";
+}
+
+// Set a dxvk.conf key. A non-empty value writes an uncommented `key = value`, replacing any
+// existing (commented or not) line for that key, else appending. An empty value comments out any
+// active line for the key, so DXVK falls back to its default. Preserves the rest of the file.
+static std::string DxvkConfSet(const std::string& text, const std::string& key, const std::string& value) {
+    std::vector<std::string> lines;
+    { std::istringstream in(text); std::string l;
+      while (std::getline(in, l)) { if (!l.empty() && l.back() == '\r') l.pop_back(); lines.push_back(l); } }
+    auto keyOf = [](const std::string& raw, bool& commented) -> std::string {
+        size_t a = raw.find_first_not_of(" \t");
+        if (a == std::string::npos) return "";
+        std::string s = raw.substr(a);
+        commented = false;
+        if (s[0] == '#') { commented = true; size_t b = s.find_first_not_of(" \t", 1);
+                           if (b == std::string::npos) return ""; s = s.substr(b); }
+        size_t eq = s.find('=');
+        if (eq == std::string::npos) return "";
+        std::string k = s.substr(0, eq);
+        size_t ke = k.find_last_not_of(" \t");
+        return (ke == std::string::npos) ? "" : k.substr(0, ke + 1);
+    };
+    const std::string newline = key + " = " + value;
+    bool done = false;
+    for (auto& l : lines) {
+        bool commented = false;
+        if (keyOf(l, commented) != key) continue;
+        if (!value.empty()) {
+            if (!done) { l = newline; done = true; }
+            else if (!commented) l = "# " + l;             // comment out stray duplicates
+        } else if (!commented) {
+            l = "# " + l;                                   // default requested: deactivate the key
+        }
+    }
+    if (!value.empty() && !done) {
+        if (!lines.empty() && !lines.back().empty()) lines.push_back("");
+        lines.push_back(newline);
+    }
+    std::string out;
+    for (const auto& l : lines) { out += l; out += "\n"; }
+    return out;
+}
+
+// Vulkan on = mctde-Link's RealD3D9Path points at our bundled d3d9_dxvk.dll.
+static bool VulkanEnabled() {
+    if (!DxvkInstalled()) return false;
+    std::wstring v = MlGetW(L"Compatibility", L"RealD3D9Path", L"");
+    if (v.empty()) return false;
+    size_t slash = v.find_last_of(L"\\/");
+    std::wstring base = (slash == std::wstring::npos) ? v : v.substr(slash + 1);
+    return _wcsicmp(base.c_str(), L"d3d9_dxvk.dll") == 0;
+}
+static void SetVulkanEnabled(bool on) {
+    if (on) MlSet(L"Compatibility", L"RealD3D9Path", DxvkDllPath());
+    else    WritePrivateProfileStringW(L"Compatibility", L"RealD3D9Path", nullptr, MlPath().c_str());
+}
+
+// present interval / max frame latency: visible label <-> dxvk.conf value.
+static const std::vector<std::wstring> VK_PRESENT_LBL = { L"App-controlled", L"Off", L"On (vsync)", L"Half-rate (30 fps)" };
+static const std::vector<std::string>  VK_PRESENT_VAL = { "-1", "0", "1", "2" };
+static const std::vector<std::wstring> VK_MAXLAT_LBL  = { L"Default", L"1 (lowest latency)", L"2", L"3" };
+static const std::vector<std::string>  VK_MAXLAT_VAL  = { "0", "1", "2", "3" };
+
+struct VkUi {
+    HWND hdr, enable, note;
+    HWND lblPresent, present;
+    HWND lblMaxLat, maxLat;
+    HWND hud, editConf, credit;
+};
+static VkUi V;
+static std::string g_vkText;      // loaded dxvk.conf, edited on save
+static bool g_vkProton = false;   // RunningUnderWine() captured when the panel is built
+static bool g_vkNote = false;     // whether the explanatory note line is shown
+
+static HWND g_setTabVk  = nullptr;
+static HWND g_setVkPanel = nullptr;
+static bool g_setVkAvail = false;
+
+static int VkLayout(HWND hWnd) {
+    RECT cr; GetClientRect(hWnd, &cr);
+    const int CWp = max(360, (int)cr.right);
+    const int LX = 16, FX = 200, ROW = 30, HDR = 28;
+    auto P = [&](HWND h, int x, int y, int w, int ht) { SetWindowPos(h, nullptr, x, y, w, ht, SWP_NOZORDER); };
+    auto S = [&](HWND h, bool v) { ShowWindow(h, v ? SW_SHOW : SW_HIDE); };
+    int y = 16;
+
+    P(V.hdr, LX, y, CWp - 32, 18); y += HDR;
+
+    // On/off switch. Always shown; greyed out under Proton (Proton's own DXVK is always in play,
+    // so the switch is meaningless there) or when DXVK isn't installed in this folder.
+    S(V.enable, true);
+    P(V.enable, LX, y, 320, 22);
+    EnableWindow(V.enable, !g_vkProton && DxvkInstalled());
+    y += ROW;
+    // Explanatory note (Proton, or DXVK-not-installed on Windows).
+    S(V.note, g_vkNote);
+    if (g_vkNote) { P(V.note, LX, y, CWp - 32, 36); y += 42; }
+
+    P(V.lblPresent, LX, y + 3, FX - LX - 6, 18); P(V.present, FX, y, 170, 200); y += ROW;
+    P(V.lblMaxLat,  LX, y + 3, FX - LX - 6, 18); P(V.maxLat,  FX, y, 170, 200); y += ROW;
+    P(V.hud, LX, y, 320, 22); y += ROW + 6;
+
+    P(V.editConf, LX, y, 130, 24); y += 34;
+    P(V.credit, LX, y, CWp - 32, 16); y += 22;
+    return y + 6;
+}
+static int VkContentHeight() { return g_setVkPanel ? VkLayout(g_setVkPanel) : 180; }
+static void VkRelayout(HWND panel) {
+    VkLayout(panel);
+    RedrawWindow(panel, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
+static void VkSave() {
+    // Renderer choice (Windows only; the switch is greyed under Proton).
+    if (!g_vkProton && DxvkInstalled())
+        SetVulkanEnabled(CtlChecked(V.enable));
+    // dxvk.conf tuning. Seed a default file if there wasn't one, then apply the three keys.
+    std::string t = g_vkText.empty() ? std::string(kDxvkConfDefault) : g_vkText;
+    t = DxvkConfSet(t, "d3d9.presentInterval", MappedValue(V.present, VK_PRESENT_VAL));
+    t = DxvkConfSet(t, "d3d9.maxFrameLatency", MappedValue(V.maxLat,  VK_MAXLAT_VAL));
+    t = DxvkConfSet(t, "dxvk.hud", CtlChecked(V.hud) ? "fps,frametimes" : "");
+    WriteFileUtf8(DxvkConfPath(), t);
+    g_vkText = t;
+}
+
+static void SettingsApplySize();   // defined with the host, below
+
+static LRESULT CALLBACK VkWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LRESULT _tr = 0;
+    if (ThemeHandle(hWnd, msg, wParam, lParam, &_tr)) return _tr;
+    switch (msg) {
+    case WM_CREATE: {
+        g_vkProton = RunningUnderWine();
+        g_vkText = ReadFileUtf8(DxvkConfPath());
+
+        V.hdr = DsMakeHeader(hWnd, L"Vulkan Renderer (DXVK)", 0, 0, 320);
+        V.enable = DsMakeCheck(hWnd, IDC_VK_ENABLE, L"Enable Vulkan (DXVK)", VulkanEnabled());
+
+        const wchar_t* noteText = nullptr;
+        if (g_vkProton)
+            noteText = L"Linux/Proton already renders on Vulkan via Proton's own DXVK, so this "
+                       L"switch isn't needed here. The settings below still apply.";
+        else if (!DxvkInstalled())
+            noteText = L"DXVK isn't installed in this folder. Reinstall mctde to add Vulkan support; "
+                       L"the settings below still apply once it is.";
+        g_vkNote = (noteText != nullptr);
+        V.note = CreateWindowW(L"STATIC", noteText ? noteText : L"",
+            WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 36, hWnd, nullptr, g_inst, nullptr);
+        SendMessageW(V.note, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+
+        std::string pi = DxvkConfGet(g_vkText, "d3d9.presentInterval");
+        std::string ml = DxvkConfGet(g_vkText, "d3d9.maxFrameLatency");
+        V.lblPresent = DsMakeLabel(hWnd, L"Vsync / present interval", 0, 0, 170);
+        V.present = MakeMappedCombo(hWnd, IDC_VK_PRESENT, 170, VK_PRESENT_LBL, VK_PRESENT_VAL,
+                                    pi.empty() ? "-1" : pi);
+        V.lblMaxLat = DsMakeLabel(hWnd, L"Max frame latency", 0, 0, 170);
+        V.maxLat = MakeMappedCombo(hWnd, IDC_VK_MAXLAT, 170, VK_MAXLAT_LBL, VK_MAXLAT_VAL,
+                                   ml.empty() ? "0" : ml);
+        V.hud = DsMakeCheck(hWnd, IDC_VK_HUD, L"Show DXVK HUD (fps + frametimes)",
+                            !DxvkConfGet(g_vkText, "dxvk.hud").empty());
+
+        V.editConf = CreateWindowW(L"BUTTON", L"Edit dxvk.conf", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+                                   0, 0, 130, 24, hWnd, (HMENU)IDC_VK_EDITCONF, g_inst, nullptr);
+        SendMessageW(V.editConf, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+        V.credit = CreateWindowW(L"STATIC",
+            L"DXVK by Philip Rebohle and contributors - zlib/libpng license. github.com/doitsujin/dxvk",
+            WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 440, 16, hWnd, nullptr, g_inst, nullptr);
+        SendMessageW(V.credit, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+
+        VkLayout(hWnd);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_VK_EDITCONF) {
+            if (!FileExists(DxvkConfPath()))
+                WriteFileUtf8(DxvkConfPath(), g_vkText.empty() ? std::string(kDxvkConfDefault) : g_vkText);
+            ShellExecuteW(hWnd, L"open", DxvkConfPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        }
+        return 0;
+    case WM_DESTROY: return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
 // ============================================================ tabbed Settings host
 // One window with two tabs -- "DSFix" and "mctde" -- that hosts the DSFix and mctde config
 // panels (each a scrolling child) and a single shared Save / Cancel bar. Save writes both
@@ -3045,7 +3315,7 @@ static void SettingsApplySize() {
     if (!dlg) return;
     RECT wa = {0}; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     int maxPanelH = SettingsMaxPanelH();
-    HWND panel = (g_setTab == 0 ? g_setDsPanel : g_setMcPanel);
+    HWND panel = (g_setTab == 0 ? g_setDsPanel : g_setTab == 1 ? g_setMcPanel : g_setVkPanel);
     int panelH;
     if (g_setTab == 0 && g_setDsAvail) {
         int contentH = DsfixLayout(panel);                 // fit DSFix to its content...
@@ -3053,6 +3323,9 @@ static void SettingsApplySize() {
     } else if (g_setTab == 1 && g_setMcAvail) {
         int contentH = McContentHeight() + 38;             // + the top toggle bar above the viewport
         panelH = max(160, min(contentH + 2, maxPanelH));    // fit mctde too; scroll only when tall
+    } else if (g_setTab == 2 && g_setVkAvail) {
+        int contentH = VkContentHeight();                  // Vulkan panel is short; fit it exactly
+        panelH = max(160, min(contentH + 2, maxPanelH));
     } else {
         panelH = 180;                                       // a "not found" placeholder
     }
@@ -3071,7 +3344,8 @@ static void SettingsApplySize() {
     SetWindowPos(panel, nullptr, 0, SET_PANELY, CW, panelH, SWP_NOZORDER);
     SetWindowPos(GetDlgItem(dlg, IDC_SET_SAVE),   nullptr, CW - 164, btnY, 70, 28, SWP_NOZORDER);
     SetWindowPos(GetDlgItem(dlg, IDC_SET_CANCEL), nullptr, CW - 86,  btnY, 70, 28, SWP_NOZORDER);
-    if (g_setTab == 0 && g_setDsAvail)      DsfixRelayout(panel);   // scrollbar for the (possibly capped) height
+    if (g_setTab == 2 && g_setVkAvail)      VkRelayout(panel);      // Vulkan panel (no scroll)
+    else if (g_setTab == 0 && g_setDsAvail) DsfixRelayout(panel);   // scrollbar for the (possibly capped) height
     else if (g_setTab == 1 && g_setMcAvail) McRelayout();           // same for mctde, even if size didn't change
     InvalidateRect(dlg, nullptr, TRUE);
 }
@@ -3082,10 +3356,12 @@ static void SettingsSelectTab(int tab) {
     g_setTab = tab;
     ShowWindow(g_setDsPanel, tab == 0 ? SW_SHOW : SW_HIDE);
     ShowWindow(g_setMcPanel, tab == 1 ? SW_SHOW : SW_HIDE);
+    if (g_setVkPanel) ShowWindow(g_setVkPanel, tab == 2 ? SW_SHOW : SW_HIDE);
     SettingsApplySize();                         // refit the window to this tab's content
     InvalidateRect(g_setTabDs, nullptr, TRUE);   // repaint the strip so active/inactive styling updates
     InvalidateRect(g_setTabMc, nullptr, TRUE);
-    XiFocusFirstIn(tab == 0 ? g_setDsPanel : g_setMcPanel);   // start on the first field, not the tab strip
+    if (g_setTabVk) InvalidateRect(g_setTabVk, nullptr, TRUE);
+    XiFocusFirstIn(tab == 0 ? g_setDsPanel : tab == 1 ? g_setMcPanel : g_setVkPanel);   // first field
 }
 
 // A tab button: the active one gets the field fill + a 2px accent border; the rest look like
@@ -3125,8 +3401,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
     LRESULT _tr = 0;
     if (msg == WM_DRAWITEM) {
         LPDRAWITEMSTRUCT d = (LPDRAWITEMSTRUCT)lParam;
-        if (d->CtlType == ODT_BUTTON && (d->CtlID == IDC_SET_TAB_DS || d->CtlID == IDC_SET_TAB_MC)) {
-            SettingsDrawTab(d, d->CtlID == (UINT)(g_setTab == 0 ? IDC_SET_TAB_DS : IDC_SET_TAB_MC));
+        if (d->CtlType == ODT_BUTTON &&
+            (d->CtlID == IDC_SET_TAB_DS || d->CtlID == IDC_SET_TAB_MC || d->CtlID == IDC_SET_TAB_VK)) {
+            UINT activeId = g_setTab == 0 ? IDC_SET_TAB_DS : g_setTab == 1 ? IDC_SET_TAB_MC : IDC_SET_TAB_VK;
+            SettingsDrawTab(d, d->CtlID == activeId);
             return TRUE;
         }
     }
@@ -3136,9 +3414,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
         switch (LOWORD(wParam)) {
         case IDC_SET_TAB_DS: SettingsSelectTab(0); return 0;
         case IDC_SET_TAB_MC: SettingsSelectTab(1); return 0;
+        case IDC_SET_TAB_VK: SettingsSelectTab(2); return 0;
         case IDC_SET_SAVE:
             if (g_setDsAvail) DsfixApplySave();   // write dsfix.ini from the DSFix panel
             if (g_setMcAvail) McSave();           // write mctde-link.ini from the mctde panel
+            if (g_setVkAvail) VkSave();           // write dxvk.conf + RealD3D9Path from the Vulkan panel
             DestroyWindow(hWnd);
             return 0;
         case IDC_SET_CANCEL: DestroyWindow(hWnd); return 0;
@@ -3171,6 +3451,7 @@ static void OpenSettings(HWND owner, int initialTab) {
         wc.lpfnWndProc = McDialogProc;    wc.lpszClassName = L"mctdeSettings";     RegisterClassW(&wc);
         wc.lpfnWndProc = McViewProc;      wc.lpszClassName = L"mctdeSetView";      RegisterClassW(&wc);
         wc.lpfnWndProc = McPreviewProc;   wc.lpszClassName = L"mctdePreview";      RegisterClassW(&wc);
+        wc.lpfnWndProc = VkWndProc;       wc.lpszClassName = L"mctdeVulkanConfig"; RegisterClassW(&wc);
         registered = true;
     }
 
@@ -3199,11 +3480,13 @@ static void OpenSettings(HWND owner, int initialTab) {
         TABX, TABY, TABW, TABH, dlg, (HMENU)IDC_SET_TAB_DS, g_inst, nullptr);
     g_setTabMc = CreateWindowW(L"BUTTON", L"mctde", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
         TABX + TABW + TABGAP, TABY, TABW, TABH, dlg, (HMENU)IDC_SET_TAB_MC, g_inst, nullptr);
+    g_setTabVk = CreateWindowW(L"BUTTON", L"Vulkan", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        TABX + 2 * (TABW + TABGAP), TABY, TABW, TABH, dlg, (HMENU)IDC_SET_TAB_VK, g_inst, nullptr);
     HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
         CW - 164, btnY, 70, 28, dlg, (HMENU)IDC_SET_SAVE, g_inst, nullptr);
     HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
         CW - 86, btnY, 70, 28, dlg, (HMENU)IDC_SET_CANCEL, g_inst, nullptr);
-    for (HWND h : { g_setTabDs, g_setTabMc, save, cancel }) SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
+    for (HWND h : { g_setTabDs, g_setTabMc, g_setTabVk, save, cancel }) SendMessageW(h, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
 
     // Both panels are built at the full viewport height; SettingsApplySize sizes the window to
     // whichever tab is showing (DSFix basic stays short; mctde and tall DSFix pages scroll).
@@ -3227,6 +3510,11 @@ static void OpenSettings(HWND owner, int initialTab) {
             WS_CHILD | SS_CENTER, 20, SET_PANELY + 40, CW - 40, 60, dlg, nullptr, g_inst, nullptr);
         SendMessageW(g_setDsPanel, WM_SETFONT, (WPARAM)g_uiFont, TRUE);
     }
+    // Vulkan tab body. Always a real panel: it manages dxvk.conf (and can create one), and shows a
+    // note when DXVK isn't installed or we're on Proton. Short, so no scrollbar.
+    g_setVkAvail = true;
+    g_setVkPanel = CreateWindowExW(WS_EX_CONTROLPARENT, L"mctdeVulkanConfig", L"", WS_CHILD | WS_CLIPCHILDREN,
+        0, SET_PANELY, CW, maxPanelH, dlg, nullptr, g_inst, nullptr);
 
     if (!dsAvail && initialTab == 0) initialTab = 1;   // don't open on an empty DSFix tab
     if (!mcAvail && initialTab == 1) initialTab = 0;
@@ -3240,7 +3528,7 @@ static void OpenSettings(HWND owner, int initialTab) {
     EnableWindow(owner, FALSE);
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
-        HWND panel = (g_setTab == 0 ? g_setDsPanel : g_setMcPanel);
+        HWND panel = (g_setTab == 0 ? g_setDsPanel : g_setTab == 1 ? g_setMcPanel : g_setVkPanel);
         // Give the active panel first crack at dialog keys (Tab/arrows within its fields), then
         // the host (tab strip + Save/Cancel), before falling back to normal dispatch.
         if (!(panel && IsDialogMessageW(panel, &msg)) && !IsDialogMessageW(dlg, &msg)) {
@@ -3251,7 +3539,7 @@ static void OpenSettings(HWND owner, int initialTab) {
     EnableWindow(owner, TRUE);
     SetForegroundWindow(owner);
     g_setHost = nullptr;
-    g_setTabDs = g_setTabMc = g_setDsPanel = g_setMcPanel = nullptr;
+    g_setTabDs = g_setTabMc = g_setTabVk = g_setDsPanel = g_setMcPanel = g_setVkPanel = nullptr;
 }
 
 // ------------------------------------------------------------ main window
@@ -4357,8 +4645,12 @@ static void XInputPoll() {
             if (top == g_hMain)                     PostMessageW(g_hMain, WM_COMMAND, IDC_BTN_PLAY, 0);
             else if (g_setHost && top == g_setHost) PostMessageW(g_setHost, WM_COMMAND, IDC_SET_SAVE, 0);
         }
-        if ((pressed & XIB_LB) && g_setHost) PostMessageW(g_setHost, WM_COMMAND, IDC_SET_TAB_DS, 0);
-        if ((pressed & XIB_RB) && g_setHost) PostMessageW(g_setHost, WM_COMMAND, IDC_SET_TAB_MC, 0);
+        // LB / RB cycle through the three Settings tabs (DSFix, mctde, Vulkan).
+        if ((pressed & (XIB_LB | XIB_RB)) && g_setHost) {
+            int t = (pressed & XIB_LB) ? (g_setTab + 2) % 3 : (g_setTab + 1) % 3;
+            UINT id = t == 0 ? IDC_SET_TAB_DS : t == 1 ? IDC_SET_TAB_MC : IDC_SET_TAB_VK;
+            PostMessageW(g_setHost, WM_COMMAND, id, 0);
+        }
     }
 
     g_xiPrevBtn = b;
